@@ -1,0 +1,12 @@
+{
+  "id": "ai-second-brain",
+  "name": "AI Second Brain",
+  "version": "0.1.0",
+  "minAppVersion": "1.5.0",
+  "description": "An AI-powered second brain assistant for Obsidian with controlled note access, chat, editing, and knowledge retrieval.",
+  "author": "Local Developer",
+  "authorUrl": "",
+  "fundingUrl": "",
+  "isDesktopOnly": true
+}
+
