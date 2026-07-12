@@ -7,6 +7,15 @@ export type StoredChatMessage = {
   createdAt: string;
 };
 
+export type StoredChatSession = {
+  id: string;
+  title: string;
+  contextScopeId: string;
+  messages: StoredChatMessage[];
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type ViewChatMessage = {
   role: "user" | "assistant";
   content: string;

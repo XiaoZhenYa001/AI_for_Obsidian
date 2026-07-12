@@ -151,6 +151,21 @@ type Citation = {
 };
 ```
 
+### 4.5 对话会话
+
+```ts
+type ChatSession = {
+  id: string;
+  title: string;
+  contextScopeId: string;
+  messages: ChatMessage[];
+  createdAt: string;
+  updatedAt: string;
+};
+```
+
+每个会话独立保存消息和上下文范围。旧版本的单一聊天记录在加载时迁移为一个历史会话。
+
 ## 5. 核心流程
 
 ### 5.1 对话问答流程
@@ -172,11 +187,12 @@ type Citation = {
 ```text
 用户选中文本
 → 选择右键 AI 操作
+→ 锁定文件、选区和原始文档状态
 → 根据操作加载 Prompt 模板
 → 调用 AI Provider
 → 生成候选修改
 → 展示差异预览
-→ 用户确认
+→ 用户确认并重新校验原始文档状态
 → 应用到编辑器
 → 支持 Obsidian 撤销
 ```
@@ -265,4 +281,3 @@ UI 层只负责展示和交互，不直接调用 Provider，也不直接读取�
 - 本地向量索引持久化。
 - 对话记忆压缩。
 - 批量笔记整理队列。
-

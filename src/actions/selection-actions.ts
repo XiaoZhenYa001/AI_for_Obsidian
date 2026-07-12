@@ -2,6 +2,7 @@ import { Editor, Notice } from "obsidian";
 import type ObsidianAIPlugin from "../main";
 import { PromptTemplateTask } from "../templates/types";
 import { DiffPreviewModal } from "../ui/diff-preview-modal";
+import { EditorChangeTransaction } from "./editor-change-transaction";
 
 export type SelectionActionType = "explain" | "summarize" | "rewrite" | "translate" | "expand" | "condense";
 
@@ -35,6 +36,14 @@ export async function runSelectionAction(
     return;
   }
 
+  const activeFile = plugin.app.workspace.getActiveFile();
+  const change = activeFile ? EditorChangeTransaction.captureSelection(editor, activeFile.path) : undefined;
+
+  if (!change) {
+    new Notice("无法锁定当前选区，请重新选择文本后再试。");
+    return;
+  }
+
   const template = plugin.templateService.findByTask(ACTION_TASKS[action]);
 
   if (!template) {
@@ -42,7 +51,6 @@ export async function runSelectionAction(
     return;
   }
 
-  const activeFile = plugin.app.workspace.getActiveFile();
   const prompt = plugin.templateService.render(template, {
     selection,
     noteTitle: activeFile?.basename,
@@ -60,12 +68,26 @@ export async function runSelectionAction(
 
     if (template.outputMode === "replace-selection") {
       new DiffPreviewModal(plugin.app, selection, response.content, (value) => {
-        editor.replaceSelection(value);
+        const result = change.apply(value, plugin.app.workspace.getActiveFile()?.path);
+
+        if (!result.applied) {
+          new Notice(result.reason);
+          return false;
+        }
+
+        return true;
       }).open();
       return;
     }
 
-    editor.replaceSelection(`${selection}\n\n> AI ${ACTION_LABELS[action]}：${response.content}`);
+    const result = change.apply(
+      `${selection}\n\n> AI ${ACTION_LABELS[action]}：${response.content}`,
+      plugin.app.workspace.getActiveFile()?.path
+    );
+
+    if (!result.applied) {
+      new Notice(result.reason);
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     new Notice(`AI ${ACTION_LABELS[action]}失败：${message}`);

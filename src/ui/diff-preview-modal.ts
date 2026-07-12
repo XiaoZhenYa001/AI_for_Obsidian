@@ -11,7 +11,7 @@ export class DiffPreviewModal extends Modal {
     app: App,
     private readonly original: string,
     private readonly proposed: string,
-    private readonly onApply: (value: string) => void
+    private readonly onApply: (value: string) => boolean | void
   ) {
     super(app);
   }
@@ -20,11 +20,6 @@ export class DiffPreviewModal extends Modal {
     const { contentEl } = this;
     contentEl.empty();
     contentEl.addClass("ai-second-brain-diff-modal");
-
-    this.scope.register([], "Enter", () => {
-      this.onApply(this.proposed);
-      this.close();
-    });
 
     const operations = buildLineDiff(this.original, this.proposed);
     const addedCount = operations.filter((op) => op.type === "added").length;
@@ -68,8 +63,11 @@ export class DiffPreviewModal extends Modal {
 
     const applyButton = createIconButton(actions, "check", "应用修改", "mod-cta");
     applyButton.addEventListener("click", () => {
-      this.onApply(this.proposed);
-      this.close();
+      const applied = this.onApply(this.proposed);
+
+      if (applied !== false) {
+        this.close();
+      }
     });
   }
 

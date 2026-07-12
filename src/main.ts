@@ -3,7 +3,7 @@ import { GenerateContentModal } from "./actions/generate-content-modal";
 import { runSelectionAction, SelectionActionType } from "./actions/selection-actions";
 import { ChatService } from "./chat/chat-service";
 import { AI_CHAT_VIEW_TYPE, AIChatView } from "./chat/chat-view";
-import { StoredChatMessage } from "./chat/types";
+import { StoredChatMessage, StoredChatSession } from "./chat/types";
 import { ContextScope } from "./context/scope-types";
 import { ContextScopeResolver } from "./context/scope-resolver";
 import { ContextScopeSwitcherModal } from "./context/scope-switcher-modal";
@@ -24,7 +24,8 @@ import { TemplateService } from "./templates/template-service";
 import { PromptTemplate } from "./templates/types";
 import { EditorSubmenuController } from "./ui/editor-submenu-controller";
 
-const CHAT_HISTORY_LIMIT = 40;
+const CHAT_MESSAGE_LIMIT = 40;
+const CHAT_SESSION_LIMIT = 30;
 
 const SELECTION_ACTIONS: Array<{ id: string; name: string; action: SelectionActionType }> = [
   { id: "ai-explain-selection", name: "AI: Explain selection", action: "explain" },
@@ -269,14 +270,17 @@ export default class ObsidianAIPlugin extends Plugin {
 
   async setActiveContextScope(scopeId: string): Promise<void> {
     await this.contextScopeManager.setActive(scopeId);
+    await this.syncActiveChatSessionContext();
   }
 
   async addContextScope(scope: ContextScope): Promise<void> {
     await this.contextScopeManager.add(scope);
+    await this.syncActiveChatSessionContext();
   }
 
   async removeContextScope(scopeId: string): Promise<void> {
     await this.contextScopeManager.remove(scopeId);
+    await this.syncActiveChatSessionContext();
   }
 
   async addProvider(provider: AIProviderConfig): Promise<void> {
@@ -291,10 +295,70 @@ export default class ObsidianAIPlugin extends Plugin {
     return this.draftManager.createGeneratedNote(title, content);
   }
 
-  // --- Chat history ---
+  // --- Chat sessions ---
 
-  async saveChatHistory(messages: StoredChatMessage[]): Promise<void> {
-    this.settings.chatHistory = messages.slice(-CHAT_HISTORY_LIMIT);
+  getActiveChatSession(): StoredChatSession {
+    const active = this.settings.chatSessions.find((session) => session.id === this.settings.activeChatSessionId);
+
+    if (active) {
+      return active;
+    }
+
+    const fallback = this.settings.chatSessions[0] || createChatSessionRecord(this.settings.activeContextScopeId);
+
+    if (this.settings.chatSessions.length === 0) {
+      this.settings.chatSessions.push(fallback);
+    }
+
+    this.settings.activeChatSessionId = fallback.id;
+    return fallback;
+  }
+
+  async createChatSession(): Promise<StoredChatSession> {
+    const session = createChatSessionRecord(this.settings.activeContextScopeId);
+    this.settings.chatSessions.unshift(session);
+    this.settings.chatSessions = this.settings.chatSessions.slice(0, CHAT_SESSION_LIMIT);
+    this.settings.activeChatSessionId = session.id;
+    await this.saveSettings();
+    return session;
+  }
+
+  async setActiveChatSession(sessionId: string): Promise<StoredChatSession | undefined> {
+    const session = this.settings.chatSessions.find((item) => item.id === sessionId);
+
+    if (!session) {
+      return undefined;
+    }
+
+    this.settings.activeChatSessionId = session.id;
+
+    if (this.settings.contextScopes.some((scope) => scope.id === session.contextScopeId)) {
+      this.settings.activeContextScopeId = session.contextScopeId;
+    } else {
+      session.contextScopeId = this.settings.activeContextScopeId;
+    }
+
+    await this.saveSettings();
+    return session;
+  }
+
+  async saveChatSessionMessages(sessionId: string, messages: StoredChatMessage[]): Promise<void> {
+    const session = this.settings.chatSessions.find((item) => item.id === sessionId);
+
+    if (!session) {
+      return;
+    }
+
+    session.messages = messages.slice(-CHAT_MESSAGE_LIMIT);
+    session.updatedAt = new Date().toISOString();
+
+    if (session.messages.length === 0) {
+      session.title = "新对话";
+    } else if (session.title === "新对话") {
+      session.title = createChatSessionTitle(session.messages);
+    }
+
+    this.settings.chatSessions.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
     await this.saveSettings();
   }
 
@@ -338,19 +402,35 @@ export default class ObsidianAIPlugin extends Plugin {
   // --- Settings ---
 
   async loadSettings(): Promise<void> {
-    const saved = (await this.loadData()) as Partial<ObsidianAISettings> | null;
-    this.settings = {
-      ...DEFAULT_SETTINGS,
-      ...saved,
-      providers: saved?.providers || DEFAULT_SETTINGS.providers,
-      contextScopes: normalizeContextScopes(saved?.contextScopes),
-      promptTemplates: normalizePromptTemplates(saved?.promptTemplates),
-      chatHistory: normalizeChatHistory(saved?.chatHistory)
-    };
+    const saved = (await this.loadData()) as (Partial<ObsidianAISettings> & {
+      chatHistory?: StoredChatMessage[];
+    }) | null;
+    const contextScopes = normalizeContextScopes(saved?.contextScopes);
+    const savedContextScopeId = contextScopes.some((scope) => scope.id === saved?.activeContextScopeId)
+      ? saved!.activeContextScopeId!
+      : CURRENT_FILE_SCOPE_ID;
+    const chatSessions = normalizeChatSessions(saved?.chatSessions, saved?.chatHistory, savedContextScopeId);
+    const activeChatSessionId = chatSessions.some((session) => session.id === saved?.activeChatSessionId)
+      ? saved!.activeChatSessionId!
+      : chatSessions[0].id;
 
-    if (!this.settings.contextScopes.some((scope) => scope.id === this.settings.activeContextScopeId)) {
-      this.settings.activeContextScopeId = CURRENT_FILE_SCOPE_ID;
+    for (const session of chatSessions) {
+      if (!contextScopes.some((scope) => scope.id === session.contextScopeId)) {
+        session.contextScopeId = savedContextScopeId;
+      }
     }
+
+    const activeSession = chatSessions.find((session) => session.id === activeChatSessionId)!;
+    this.settings = {
+      providers: saved?.providers || DEFAULT_SETTINGS.providers,
+      defaultChatProviderId: saved?.defaultChatProviderId || DEFAULT_SETTINGS.defaultChatProviderId,
+      defaultEditProviderId: saved?.defaultEditProviderId || DEFAULT_SETTINGS.defaultEditProviderId,
+      activeContextScopeId: activeSession.contextScopeId,
+      contextScopes,
+      promptTemplates: normalizePromptTemplates(saved?.promptTemplates),
+      chatSessions,
+      activeChatSessionId
+    };
   }
 
   async saveSettings(): Promise<void> {
@@ -424,7 +504,10 @@ export default class ObsidianAIPlugin extends Plugin {
       {
         label: "对话记忆",
         status: "pass",
-        detail: `当前保存了 ${this.settings.chatHistory.length} 条侧边栏会话消息，最多保留最近 ${CHAT_HISTORY_LIMIT} 条。`
+        detail: `当前保存了 ${this.settings.chatSessions.length} 个会话、${this.settings.chatSessions.reduce(
+          (count, session) => count + session.messages.length,
+          0
+        )} 条消息。`
       },
       {
         label: "知识库分析",
@@ -441,18 +524,79 @@ export default class ObsidianAIPlugin extends Plugin {
       }
     ];
   }
+
+  private async syncActiveChatSessionContext(): Promise<void> {
+    const session = this.getActiveChatSession();
+
+    if (session.contextScopeId === this.settings.activeContextScopeId) {
+      return;
+    }
+
+    session.contextScopeId = this.settings.activeContextScopeId;
+    session.updatedAt = new Date().toISOString();
+    await this.saveSettings();
+  }
 }
 
 function normalizeChatHistory(messages: StoredChatMessage[] | undefined): StoredChatMessage[] {
   return (messages || [])
     .filter((message) => (message.role === "user" || message.role === "assistant") && Boolean(message.content))
-    .slice(-CHAT_HISTORY_LIMIT)
+    .slice(-CHAT_MESSAGE_LIMIT)
     .map((message) => ({
       role: message.role,
       content: message.content,
       citations: message.citations || [],
       createdAt: message.createdAt || new Date().toISOString()
     }));
+}
+
+function normalizeChatSessions(
+  sessions: StoredChatSession[] | undefined,
+  legacyMessages: StoredChatMessage[] | undefined,
+  contextScopeId: string
+): StoredChatSession[] {
+  const source = sessions && sessions.length > 0
+    ? sessions
+    : [createChatSessionRecord(contextScopeId, normalizeChatHistory(legacyMessages))];
+
+  return source
+    .map((session) => {
+      const messages = normalizeChatHistory(session.messages);
+      const createdAt = session.createdAt || messages[0]?.createdAt || new Date().toISOString();
+
+      return {
+        id: session.id || `chat-${crypto.randomUUID()}`,
+        title: session.title || createChatSessionTitle(messages),
+        contextScopeId: session.contextScopeId || contextScopeId,
+        messages,
+        createdAt,
+        updatedAt: session.updatedAt || messages[messages.length - 1]?.createdAt || createdAt
+      };
+    })
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+    .slice(0, CHAT_SESSION_LIMIT);
+}
+
+function createChatSessionRecord(contextScopeId: string, messages: StoredChatMessage[] = []): StoredChatSession {
+  const now = new Date().toISOString();
+  return {
+    id: `chat-${crypto.randomUUID()}`,
+    title: createChatSessionTitle(messages),
+    contextScopeId,
+    messages: messages.slice(-CHAT_MESSAGE_LIMIT),
+    createdAt: messages[0]?.createdAt || now,
+    updatedAt: messages[messages.length - 1]?.createdAt || now
+  };
+}
+
+function createChatSessionTitle(messages: StoredChatMessage[]): string {
+  const firstQuestion = messages.find((message) => message.role === "user")?.content.replace(/\s+/g, " ").trim();
+
+  if (!firstQuestion) {
+    return "新对话";
+  }
+
+  return firstQuestion.length > 28 ? `${firstQuestion.slice(0, 28)}...` : firstQuestion;
 }
 
 function normalizeContextScopes(scopes: ContextScope[] | undefined): ContextScope[] {

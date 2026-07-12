@@ -1,4 +1,4 @@
-import { ItemView, Notice, setIcon, TFile, WorkspaceLeaf } from "obsidian";
+import { Component, ItemView, MarkdownRenderer, Notice, setIcon, TFile, WorkspaceLeaf } from "obsidian";
 import type ObsidianAIPlugin from "../main";
 import { isAbortError } from "../providers/errors";
 import { ChatMessage } from "../providers/types";
@@ -6,20 +6,27 @@ import { Citation } from "../retrieval/types";
 import { DiffPreviewModal } from "../ui/diff-preview-modal";
 import { createIconButton } from "../ui/icon-button";
 import { StoredChatMessage, ViewChatMessage } from "./types";
+import { EditorChangeTransaction } from "../actions/editor-change-transaction";
 
 export const AI_CHAT_VIEW_TYPE = "ai-second-brain-chat-view";
 
 export class AIChatView extends ItemView {
   private messagesEl?: HTMLElement;
   private inputEl?: HTMLTextAreaElement;
+  private sessionSelectEl?: HTMLSelectElement;
   private scopeSelectEl?: HTMLSelectElement;
   private scopeMetaEl?: HTMLElement;
   private sendButtonEl?: HTMLButtonElement;
   private stopButtonEl?: HTMLButtonElement;
+  private newSessionButtonEl?: HTMLButtonElement;
+  private clearButtonEl?: HTMLButtonElement;
   private messages: ViewChatMessage[] = [];
+  private activeSessionId = "";
   private isGenerating = false;
   private abortController?: AbortController;
   private expandedCitationKeys = new Set<string>();
+  private messageRenderComponents: Component[] = [];
+  private sessionDrafts = new Map<string, string>();
 
   constructor(leaf: WorkspaceLeaf, private readonly plugin: ObsidianAIPlugin) {
     super(leaf);
@@ -38,7 +45,9 @@ export class AIChatView extends ItemView {
   }
 
   async onOpen(): Promise<void> {
-    this.messages = this.plugin.settings.chatHistory.map(toViewMessage);
+    const activeSession = this.plugin.getActiveChatSession();
+    this.activeSessionId = activeSession.id;
+    this.messages = activeSession.messages.map(toViewMessage);
     const container = this.containerEl.children[1];
     container.empty();
     container.addClass("ai-second-brain-view");
@@ -47,9 +56,27 @@ export class AIChatView extends ItemView {
     const titleRow = header.createDiv({ cls: "ai-second-brain-header-row" });
     titleRow.createEl("div", { cls: "ai-second-brain-title", text: "AI Second Brain" });
 
-    const clearButton = createIconButton(titleRow, "trash-2", "清空", "ai-second-brain-clear");
-    clearButton.addEventListener("click", () => {
+    const headerActions = titleRow.createDiv({ cls: "ai-second-brain-header-actions" });
+    this.newSessionButtonEl = createIconButton(headerActions, "square-pen", "新对话", "ai-second-brain-new-session");
+    this.newSessionButtonEl.addEventListener("click", () => {
+      void this.startNewSession();
+    });
+
+    this.clearButtonEl = createIconButton(headerActions, "trash-2", "清空当前对话", "ai-second-brain-clear");
+    this.clearButtonEl.addEventListener("click", () => {
       void this.clearMessages();
+    });
+
+    const sessionControls = header.createDiv({ cls: "ai-second-brain-session-controls" });
+    const sessionIcon = sessionControls.createSpan({ cls: "ai-second-brain-session-icon" });
+    setIcon(sessionIcon, "messages-square");
+    this.sessionSelectEl = sessionControls.createEl("select", {
+      cls: "ai-second-brain-session-select",
+      attr: { "aria-label": "切换对话" }
+    });
+    this.refreshSessionControls();
+    this.sessionSelectEl.addEventListener("change", () => {
+      void this.switchSession(this.sessionSelectEl?.value || "");
     });
 
     const scopeControls = header.createDiv({ cls: "ai-second-brain-scope-controls" });
@@ -102,13 +129,18 @@ export class AIChatView extends ItemView {
   }
 
   async onClose(): Promise<void> {
+    this.rememberCurrentDraft();
     this.abortController?.abort();
+    this.clearMessageRenderComponents();
     this.messagesEl = undefined;
     this.inputEl = undefined;
+    this.sessionSelectEl = undefined;
     this.scopeSelectEl = undefined;
     this.scopeMetaEl = undefined;
     this.sendButtonEl = undefined;
     this.stopButtonEl = undefined;
+    this.newSessionButtonEl = undefined;
+    this.clearButtonEl = undefined;
   }
 
   private async submit(): Promise<void> {
@@ -189,6 +221,7 @@ export class AIChatView extends ItemView {
       return;
     }
 
+    this.clearMessageRenderComponents();
     this.messagesEl.empty();
 
     if (this.messages.length === 0) {
@@ -212,21 +245,18 @@ export class AIChatView extends ItemView {
       });
       const contentEl = item.createDiv({ cls: "ai-second-brain-message-content" });
 
-      if (message.role === "assistant" && !message.content.trim() && !message.isComplete) {
-        this.renderThinkingState(contentEl);
-      } else {
-        contentEl.setText(message.content);
-
-        if (message.role === "assistant" && !message.isComplete) {
-          contentEl.createSpan({ cls: "ai-second-brain-stream-cursor" });
-        }
-      }
+      this.renderMessageContent(contentEl, message);
 
       if (message.citations && message.citations.length > 0) {
         this.renderCitations(item, message.citations);
       }
 
-      if (message.role === "assistant" && message.content.trim() && message.isComplete) {
+      if (
+        message.role === "assistant" &&
+        message.content.trim() &&
+        message.isComplete &&
+        message.status === "complete"
+      ) {
         this.renderAssistantActions(group, message);
       }
     }
@@ -293,8 +323,35 @@ export class AIChatView extends ItemView {
     }
   }
 
+  private renderMessageContent(container: HTMLElement, message: ViewChatMessage): void {
+    if (message.role === "assistant" && message.isComplete && message.status === "complete") {
+      container.addClass("is-rendered-markdown");
+      const sourcePath = this.plugin.getEditableMarkdownView()?.file?.path || "";
+      const renderComponent = this.addChild(new Component());
+      this.messageRenderComponents.push(renderComponent);
+      void MarkdownRenderer.render(this.app, message.content, container, sourcePath, renderComponent);
+      return;
+    }
+
+    if (message.role === "assistant" && !message.content.trim() && !message.isComplete) {
+      this.renderThinkingState(container);
+      return;
+    }
+
+    container.setText(message.content);
+
+    if (message.role === "assistant" && !message.isComplete) {
+      container.createSpan({ cls: "ai-second-brain-stream-cursor" });
+    }
+  }
+
   private renderAssistantActions(container: HTMLElement, message: ViewChatMessage): void {
     const actions = container.createDiv({ cls: "ai-second-brain-message-actions" });
+
+    const copyButton = createIconButton(actions, "copy", "复制");
+    copyButton.addEventListener("click", () => {
+      void this.copyMessage(message.content);
+    });
 
     const insertButton = createIconButton(actions, "corner-down-left", "插入到光标");
     insertButton.addEventListener("click", () => {
@@ -377,22 +434,34 @@ export class AIChatView extends ItemView {
   }
 
   private previewInsertAtCursor(content: string): void {
-    const editor = this.getActiveEditor();
+    const view = this.plugin.getEditableMarkdownView();
+    const editor = view?.editor;
 
-    if (!editor) {
+    if (!editor || !view.file) {
       new Notice("请先打开一个可编辑的 Markdown 笔记。");
       return;
     }
 
+    const change = EditorChangeTransaction.captureInsertion(editor, view.file.path);
+
     new DiffPreviewModal(this.app, "", content, (value) => {
-      editor.replaceRange(value, editor.getCursor());
+      const currentView = this.plugin.getEditableMarkdownView();
+      const result = change.apply(value, currentView?.file?.path);
+
+      if (!result.applied) {
+        new Notice(result.reason);
+        return false;
+      }
+
+      return true;
     }).open();
   }
 
   private previewReplaceSelection(content: string): void {
-    const editor = this.getActiveEditor();
+    const view = this.plugin.getEditableMarkdownView();
+    const editor = view?.editor;
 
-    if (!editor) {
+    if (!editor || !view.file) {
       new Notice("请先打开一个可编辑的 Markdown 笔记。");
       return;
     }
@@ -404,8 +473,23 @@ export class AIChatView extends ItemView {
       return;
     }
 
+    const change = EditorChangeTransaction.captureSelection(editor, view.file.path);
+
+    if (!change) {
+      new Notice("无法锁定当前选区，请重新选择文本后再试。");
+      return;
+    }
+
     new DiffPreviewModal(this.app, selection, content, (value) => {
-      editor.replaceSelection(value);
+      const currentView = this.plugin.getEditableMarkdownView();
+      const result = change.apply(value, currentView?.file?.path);
+
+      if (!result.applied) {
+        new Notice(result.reason);
+        return false;
+      }
+
+      return true;
     }).open();
   }
 
@@ -414,8 +498,65 @@ export class AIChatView extends ItemView {
     await this.app.workspace.getLeaf(false).openFile(file);
   }
 
-  private getActiveEditor() {
-    return this.plugin.getEditableMarkdownView()?.editor;
+  private async copyMessage(content: string): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(content);
+      new Notice("已复制 AI 回复。");
+    } catch {
+      new Notice("复制失败，请手动选择内容复制。");
+    }
+  }
+
+  private async startNewSession(): Promise<void> {
+    if (this.isGenerating) {
+      new Notice("请先停止当前回答，再开始新对话。");
+      return;
+    }
+
+    if (this.messages.length === 0) {
+      this.inputEl?.focus();
+      return;
+    }
+
+    this.rememberCurrentDraft();
+    const session = await this.plugin.createChatSession();
+    this.activeSessionId = session.id;
+    this.messages = [];
+    this.expandedCitationKeys.clear();
+    this.refreshSessionControls();
+    this.refreshScopeControls();
+    this.renderMessages();
+    this.restoreSessionDraft();
+    this.inputEl?.focus();
+  }
+
+  private async switchSession(sessionId: string): Promise<void> {
+    if (!sessionId || sessionId === this.activeSessionId) {
+      return;
+    }
+
+    if (this.isGenerating) {
+      this.refreshSessionControls();
+      new Notice("请先停止当前回答，再切换对话。");
+      return;
+    }
+
+    this.rememberCurrentDraft();
+    const session = await this.plugin.setActiveChatSession(sessionId);
+
+    if (!session) {
+      this.refreshSessionControls();
+      new Notice("找不到该对话，它可能已被删除。");
+      return;
+    }
+
+    this.activeSessionId = session.id;
+    this.messages = session.messages.map(toViewMessage);
+    this.expandedCitationKeys.clear();
+    this.refreshSessionControls();
+    this.refreshScopeControls();
+    this.renderMessages();
+    this.restoreSessionDraft();
   }
 
   private async clearMessages(): Promise<void> {
@@ -423,11 +564,13 @@ export class AIChatView extends ItemView {
     this.messages = [];
     this.expandedCitationKeys.clear();
     this.renderMessages();
-    await this.plugin.saveChatHistory([]);
+    await this.plugin.saveChatSessionMessages(this.activeSessionId, []);
+    this.refreshSessionControls();
   }
 
   private async saveMessages(): Promise<void> {
-    await this.plugin.saveChatHistory(
+    await this.plugin.saveChatSessionMessages(
+      this.activeSessionId,
       this.messages
         .filter((message) => message.content.trim())
         .map((message) => ({
@@ -437,6 +580,7 @@ export class AIChatView extends ItemView {
           createdAt: message.createdAt || new Date().toISOString()
         }))
     );
+    this.refreshSessionControls();
   }
 
   private setGenerating(value: boolean): void {
@@ -453,6 +597,57 @@ export class AIChatView extends ItemView {
     if (this.stopButtonEl) {
       this.stopButtonEl.style.display = value ? "" : "none";
     }
+
+    if (this.sessionSelectEl) {
+      this.sessionSelectEl.disabled = value;
+    }
+
+    if (this.newSessionButtonEl) {
+      this.newSessionButtonEl.disabled = value;
+    }
+
+    if (this.clearButtonEl) {
+      this.clearButtonEl.disabled = value;
+    }
+  }
+
+  private refreshSessionControls(): void {
+    if (!this.sessionSelectEl) {
+      return;
+    }
+
+    this.sessionSelectEl.empty();
+
+    for (const session of this.plugin.settings.chatSessions) {
+      this.sessionSelectEl.createEl("option", {
+        value: session.id,
+        text: session.title
+      });
+    }
+
+    this.sessionSelectEl.value = this.activeSessionId;
+  }
+
+  private rememberCurrentDraft(): void {
+    if (!this.activeSessionId || !this.inputEl) {
+      return;
+    }
+
+    this.sessionDrafts.set(this.activeSessionId, this.inputEl.value);
+  }
+
+  private restoreSessionDraft(): void {
+    if (this.inputEl) {
+      this.inputEl.value = this.sessionDrafts.get(this.activeSessionId) || "";
+    }
+  }
+
+  private clearMessageRenderComponents(): void {
+    for (const component of this.messageRenderComponents) {
+      this.removeChild(component);
+    }
+
+    this.messageRenderComponents = [];
   }
 
   private refreshScopeControls(): void {
@@ -496,5 +691,3 @@ function toProviderHistory(messages: ViewChatMessage[]): ChatMessage[] {
       content: message.content
     }));
 }
-
-

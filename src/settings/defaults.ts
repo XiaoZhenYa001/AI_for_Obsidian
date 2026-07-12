@@ -7,7 +7,8 @@ export const DEFAULT_SETTINGS: ObsidianAISettings = {
   defaultEditProviderId: "",
   activeContextScopeId: "current-file",
   promptTemplates: BUILT_IN_PROMPT_TEMPLATES.map((t) => ({ ...t })),
-  chatHistory: [],
+  chatSessions: [],
+  activeChatSessionId: "",
   contextScopes: [
     {
       id: "current-file",

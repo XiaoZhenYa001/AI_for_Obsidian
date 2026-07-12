@@ -1,7 +1,8 @@
-import { App, Editor, MarkdownRenderer, Modal, Notice, setIcon, Setting } from "obsidian";
+import { App, Component, Editor, MarkdownRenderer, Modal, Notice, setIcon, Setting } from "obsidian";
 import type ObsidianAIPlugin from "../main";
 import { Citation } from "../retrieval/types";
 import { createIconButton } from "../ui/icon-button";
+import { EditorChangeTransaction } from "./editor-change-transaction";
 
 type OutputTarget = "insert" | "new-note";
 
@@ -18,6 +19,8 @@ export class GenerateContentModal extends Modal {
   private generateButtonEl?: HTMLButtonElement;
   private insertButtonEl?: HTMLButtonElement;
   private newNoteButtonEl?: HTMLButtonElement;
+  private insertionTarget?: EditorChangeTransaction;
+  private previewRenderComponent?: Component;
 
   constructor(
     app: App,
@@ -26,6 +29,15 @@ export class GenerateContentModal extends Modal {
   ) {
     super(app);
     this.outputTarget = editor ? "insert" : "new-note";
+    const activeFile = plugin.app.workspace.getActiveFile();
+
+    if (editor && activeFile) {
+      this.insertionTarget = EditorChangeTransaction.captureInsertion(editor, activeFile.path);
+    }
+  }
+
+  onClose(): void {
+    this.clearPreviewRenderComponent();
   }
 
   onOpen(): void {
@@ -152,7 +164,7 @@ export class GenerateContentModal extends Modal {
   }
 
   private insertIntoEditor(): void {
-    if (!this.editor) {
+    if (!this.editor || !this.insertionTarget) {
       new Notice("当前没有可插入的编辑器。");
       return;
     }
@@ -161,7 +173,14 @@ export class GenerateContentModal extends Modal {
       return;
     }
 
-    this.editor.replaceRange(this.generatedContent, this.editor.getCursor());
+    const currentFile = this.plugin.getEditableMarkdownView()?.file;
+    const result = this.insertionTarget.apply(this.generatedContent, currentFile?.path);
+
+    if (!result.applied) {
+      new Notice(result.reason);
+      return;
+    }
+
     this.close();
   }
 
@@ -185,6 +204,7 @@ export class GenerateContentModal extends Modal {
       return;
     }
 
+    this.clearPreviewRenderComponent();
     this.previewEl.empty();
     this.previewEl.removeClass("is-empty", "is-busy", "is-ready", "is-error");
     this.previewEl.addClass(`is-${state}`);
@@ -212,7 +232,10 @@ export class GenerateContentModal extends Modal {
     }
 
     const preEl = this.previewEl.createDiv();
-    void MarkdownRenderer.render(this.app, content, preEl, "", this.plugin);
+    const renderComponent = new Component();
+    renderComponent.load();
+    this.previewRenderComponent = renderComponent;
+    void MarkdownRenderer.render(this.app, content, preEl, "", renderComponent);
   }
 
   private renderCitations(): void {
@@ -277,6 +300,15 @@ export class GenerateContentModal extends Modal {
     } else {
       button.setText(text);
     }
+  }
+
+  private clearPreviewRenderComponent(): void {
+    if (!this.previewRenderComponent) {
+      return;
+    }
+
+    this.previewRenderComponent.unload();
+    this.previewRenderComponent = undefined;
   }
 }
 
