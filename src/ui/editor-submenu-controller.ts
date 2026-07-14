@@ -2,6 +2,7 @@ import { Editor, Menu } from "obsidian";
 import type ObsidianAIPlugin from "../main";
 import { runSelectionAction } from "../actions/selection-actions";
 import { GenerateContentModal } from "../actions/generate-content-modal";
+import { GenerateDiagramModal } from "../diagrams/generate-diagram-modal";
 
 const SUBMENU_CLOSE_DELAY_MS = 180;
 const SUBMENU_OFFSET_PX = 8;
@@ -161,6 +162,13 @@ export class EditorSubmenuController {
     submenu.addItem((item) =>
       item.setTitle("生成内容").setIcon("file-plus-2").onClick(() => {
         new GenerateContentModal(this.plugin.app, this.plugin, editor).open();
+      })
+    );
+    submenu.addItem((item) =>
+      item.setTitle("生成图谱").setIcon("workflow").onClick(() => {
+        const view = this.plugin.getEditableMarkdownView();
+        const sourceFile = view?.editor === editor ? view.file || undefined : undefined;
+        new GenerateDiagramModal(this.plugin.app, this.plugin, editor, sourceFile).open();
       })
     );
 

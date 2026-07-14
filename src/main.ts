@@ -8,6 +8,8 @@ import { ContextScope } from "./context/scope-types";
 import { ContextScopeResolver } from "./context/scope-resolver";
 import { ContextScopeSwitcherModal } from "./context/scope-switcher-modal";
 import { SelfCheckItem, SelfCheckModal } from "./diagnostics/self-check-modal";
+import { DiagramService } from "./diagrams/diagram-service";
+import { GenerateDiagramModal } from "./diagrams/generate-diagram-modal";
 import { KnowledgeAnalysisService } from "./knowledge/analysis-service";
 import { KnowledgeHealthReportModal } from "./knowledge/health-report-modal";
 import { ContextScopeManager, CURRENT_FILE_SCOPE_ID } from "./managers/context-scope-manager";
@@ -47,6 +49,7 @@ export default class ObsidianAIPlugin extends Plugin {
   contextScopeManager!: ContextScopeManager;
   providerManager!: ProviderManager;
   draftManager!: DraftManager;
+  diagramService!: DiagramService;
   private lastMarkdownView?: MarkdownView;
   private editorSubmenuController!: EditorSubmenuController;
 
@@ -54,7 +57,7 @@ export default class ObsidianAIPlugin extends Plugin {
     await this.loadSettings();
 
     this.providerRegistry = new ProviderRegistry(this.settings.providers);
-    this.contextScopeResolver = new ContextScopeResolver(this.app);
+    this.contextScopeResolver = new ContextScopeResolver(this.app, () => this.getEditableMarkdownView()?.file || undefined);
     this.textSearchService = new TextSearchService(this.app);
     this.templateService = new TemplateService(this.settings.promptTemplates);
     this.knowledgeAnalysisService = new KnowledgeAnalysisService(this.app);
@@ -62,6 +65,7 @@ export default class ObsidianAIPlugin extends Plugin {
     this.contextScopeManager = new ContextScopeManager(this);
     this.providerManager = new ProviderManager(this);
     this.draftManager = new DraftManager(this);
+    this.diagramService = new DiagramService(this);
     this.editorSubmenuController = new EditorSubmenuController(this);
 
     this.registerView(AI_CHAT_VIEW_TYPE, (leaf) => new AIChatView(leaf, this));
@@ -156,6 +160,15 @@ export default class ObsidianAIPlugin extends Plugin {
       name: "AI: Generate new note",
       callback: () => {
         new GenerateContentModal(this.app, this).open();
+      }
+    });
+
+    this.addCommand({
+      id: "ai-generate-excalidraw-diagram",
+      name: "AI: Generate Excalidraw diagram",
+      callback: () => {
+        const view = this.getEditableMarkdownView();
+        new GenerateDiagramModal(this.app, this, view?.editor, view?.file || undefined).open();
       }
     });
 
@@ -291,8 +304,8 @@ export default class ObsidianAIPlugin extends Plugin {
     await this.providerManager.remove(providerId);
   }
 
-  async createGeneratedNote(title: string, content: string): Promise<TFile> {
-    return this.draftManager.createGeneratedNote(title, content);
+  async createGeneratedNote(title: string, content: string, folderPath?: string): Promise<TFile> {
+    return this.draftManager.createGeneratedNote(title, content, folderPath);
   }
 
   // --- Chat sessions ---
@@ -429,7 +442,10 @@ export default class ObsidianAIPlugin extends Plugin {
       contextScopes,
       promptTemplates: normalizePromptTemplates(saved?.promptTemplates),
       chatSessions,
-      activeChatSessionId
+      activeChatSessionId,
+      diagramFolder: saved?.diagramFolder || DEFAULT_SETTINGS.diagramFolder,
+      diagramMaxNodes: clampDiagramMaxNodes(saved?.diagramMaxNodes),
+      diagramAutoEmbed: saved?.diagramAutoEmbed ?? DEFAULT_SETTINGS.diagramAutoEmbed
     };
   }
 
@@ -521,6 +537,13 @@ export default class ObsidianAIPlugin extends Plugin {
           indexStats.indexedFiles > 0
             ? `已缓存 ${indexStats.indexedFiles} 个文件、${indexStats.indexedChunks} 个片段。`
             : "尚未缓存索引。发送上下文问答会自动建立，也可以运行 AI: Rebuild local text index。"
+      },
+      {
+        label: "Excalidraw 绘图",
+        status: this.diagramService.isExcalidrawAvailable() ? "pass" : "warn",
+        detail: this.diagramService.isExcalidrawAvailable()
+          ? "ExcalidrawAutomate 已就绪，可以创建可编辑图谱。"
+          : "未检测到 Excalidraw，绘图任务会降级为 Mermaid 笔记。"
       }
     ];
   }
@@ -597,6 +620,14 @@ function createChatSessionTitle(messages: StoredChatMessage[]): string {
   }
 
   return firstQuestion.length > 28 ? `${firstQuestion.slice(0, 28)}...` : firstQuestion;
+}
+
+function clampDiagramMaxNodes(value: number | undefined): number {
+  if (!Number.isFinite(value)) {
+    return DEFAULT_SETTINGS.diagramMaxNodes;
+  }
+
+  return Math.max(8, Math.min(40, Math.round(value!)));
 }
 
 function normalizeContextScopes(scopes: ContextScope[] | undefined): ContextScope[] {

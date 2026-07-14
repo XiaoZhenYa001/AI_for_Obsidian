@@ -12,4 +12,7 @@ export type ObsidianAISettings = {
   promptTemplates: PromptTemplate[];
   chatSessions: StoredChatSession[];
   activeChatSessionId: string;
+  diagramFolder: string;
+  diagramMaxNodes: number;
+  diagramAutoEmbed: boolean;
 };

@@ -11,6 +11,7 @@ Obsidian Plugin
 ├─ UI Layer
 │  ├─ Chat Sidebar
 │  ├─ Context Switcher
+│  ├─ Authorized Files Inspector
 │  ├─ Settings Tab
 │  ├─ Diff Preview Modal
 │  └─ Command/Menu Integration
@@ -20,6 +21,7 @@ Obsidian Plugin
 │  ├─ Context Scope Service
 │  ├─ Retrieval Service
 │  ├─ Template Service
+│  ├─ Diagram Service
 │  └─ Knowledge Analysis Service
 ├─ AI Layer
 │  ├─ Provider Registry
@@ -33,6 +35,12 @@ Obsidian Plugin
 │  ├─ Conversation Store
 │  ├─ Vector/Text Index Store
 │  └─ Prompt Template Store
+├─ Diagram Integration
+│  ├─ Diagram Spec Validator
+│  ├─ Dagre Layout Engine
+│  ├─ Layout Preview Renderer
+│  ├─ ExcalidrawAutomate Adapter
+│  └─ Mermaid Fallback
 └─ Obsidian API Adapter
    ├─ Vault Reader
    ├─ Metadata Cache Reader
@@ -80,6 +88,14 @@ src/
 │  ├─ template-types.ts
 │  ├─ built-in-templates.ts
 │  └─ template-store.ts
+├─ diagrams/
+│  ├─ types.ts
+│  ├─ diagram-spec.ts
+│  ├─ layout.ts
+│  ├─ diagram-preview.ts
+│  ├─ diagram-service.ts
+│  ├─ excalidraw-adapter.ts
+│  └─ generate-diagram-modal.ts
 ├─ ui/
 │  ├─ components/
 │  ├─ diff-preview-modal.ts
@@ -208,6 +224,26 @@ type ChatSession = {
 → 文件变更时增量更新
 ```
 
+### 5.4 可编辑图谱生成流程
+
+```text
+选中文本、当前笔记、授权范围或 AI 回复
+→ 解析并锁定允许使用的来源路径
+→ AI 仅生成受约束的 DiagramSpec JSON
+→ 本地校验节点、关系与来源路径
+→ Dagre 在本地计算稳定布局
+→ 本地渲染布局、节点、关系和来源预览
+→ ExcalidrawAutomate 创建可编辑绘图
+→ 未安装 Excalidraw 时降级为 Mermaid 笔记
+→ 用户明确选择后嵌入当前笔记
+```
+
+AI 不直接输出 Excalidraw 文件 JSON，也不能指定任意 Vault 路径。图形布局、文件创建和嵌入操作均由本地代码完成；节点的 `sourcePath` 必须来自本次已授权或已引用的 Markdown 文件。
+
+图谱生成弹窗持有独立的 `AbortController`。关闭弹窗、主动停止或修改生成参数时会中止当前请求；仅当前请求可以提交预览结果。创建文件期间按钮进入互斥状态，避免重复创建。
+
+生成后的 `DiagramSpec` 可以在弹窗内本地编辑。节点或关系发生变化后，弹窗生成新的不可变 Spec，并再次调用 Dagre 计算布局；这一过程不经过 Provider。删除节点时同步删除相关边，自环和重复边在写入草稿前被拒绝。
+
 ## 6. 文件访问控制设计
 
 文件访问控制应集中在 `ContextScopeService` 中完成。任何需要读取笔记内容的模块，都必须先通过范围解析器获取授权文件列表。
@@ -256,9 +292,11 @@ UI 层只负责展示和交互，不直接调用 Provider，也不直接读取�
 - AI 侧边栏。
 - 设置页。
 - 上下文切换器。
+- 已授权文件检查器。
 - Prompt 模板管理。
 - 差异预览弹窗。
 - 知识库健康检查结果页。
+- 可编辑图谱生成弹窗。
 
 ## 10. 错误处理
 
@@ -279,5 +317,7 @@ UI 层只负责展示和交互，不直接调用 Provider，也不直接读取�
 - 周报和日记复盘工作流。
 - 多模型任务路由。
 - 本地向量索引持久化。
+- 基于现有 Excalidraw 画布的增量修改。
+- 大型知识库的交互式全局图谱浏览器。
 - 对话记忆压缩。
 - 批量笔记整理队列。

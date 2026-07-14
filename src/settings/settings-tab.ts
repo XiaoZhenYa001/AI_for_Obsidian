@@ -65,6 +65,9 @@ export class ObsidianAISettingTab extends PluginSettingTab {
     this.renderSettingsSection(containerEl, "scroll-text", "Prompt 模板", "维护右键菜单与命令面板使用的任务提示词。", (section) => {
       this.renderTemplateSection(section);
     });
+    this.renderSettingsSection(containerEl, "workflow", "视觉图谱", "配置 Excalidraw 图谱的保存位置和生成边界。", (section) => {
+      this.renderDiagramSection(section);
+    });
   }
 
   private renderSettingsHero(containerEl: HTMLElement): void {
@@ -234,6 +237,58 @@ export class ObsidianAISettingTab extends PluginSettingTab {
           provider.defaultModel = "claude-3-5-sonnet-latest";
           await this.plugin.addProvider(provider);
           this.display();
+        })
+      );
+  }
+
+  private renderDiagramSection(containerEl: HTMLElement): void {
+    const integration = containerEl.createDiv({ cls: "ai-second-brain-diagram-integration" });
+    const integrationIcon = integration.createDiv({ cls: "ai-second-brain-diagram-integration-icon" });
+    setIcon(integrationIcon, this.plugin.diagramService.isExcalidrawAvailable() ? "badge-check" : "circle-alert");
+    const integrationCopy = integration.createDiv({ cls: "ai-second-brain-diagram-integration-copy" });
+    integrationCopy.createDiv({
+      cls: "ai-second-brain-diagram-integration-title",
+      text: this.plugin.diagramService.isExcalidrawAvailable() ? "Excalidraw 已连接" : "Excalidraw 未连接"
+    });
+    integrationCopy.createDiv({
+      cls: "ai-second-brain-muted",
+      text: this.plugin.diagramService.isExcalidrawAvailable()
+        ? "图谱将创建为可继续编辑的 Excalidraw 文件。"
+        : "生成图谱时将自动降级为 Mermaid 笔记。"
+    });
+
+    new Setting(containerEl)
+      .setName("绘图文件夹")
+      .setDesc("Excalidraw 图谱在 Vault 中的保存位置。")
+      .addText((text) =>
+        text.setPlaceholder("AI Second Brain/Diagrams")
+          .setValue(this.plugin.settings.diagramFolder)
+          .onChange((value) => {
+            this.plugin.settings.diagramFolder = value.trim() || "AI Second Brain/Diagrams";
+            debouncedSave(() => this.plugin.saveSettings());
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("最大节点数")
+      .setDesc("限制单次绘图复杂度，避免生成难以阅读的大图。")
+      .addSlider((slider) =>
+        slider.setLimits(8, 40, 1)
+          .setValue(this.plugin.settings.diagramMaxNodes)
+          .setDynamicTooltip()
+          .onChange(async (value) => {
+            this.plugin.settings.diagramMaxNodes = value;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("默认嵌入当前笔记")
+      .setDesc("创建绘图后，在发起操作的笔记光标处插入嵌入链接。")
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.diagramAutoEmbed).onChange(async (value) => {
+          this.plugin.settings.diagramAutoEmbed = value;
+          await this.plugin.saveSettings();
         })
       );
   }

@@ -1,4 +1,4 @@
-import { Notice, TFile, TFolder } from "obsidian";
+import { normalizePath, Notice, TFile, TFolder } from "obsidian";
 import type ObsidianAIPlugin from "../main";
 import { KnowledgeHealthReport } from "../knowledge/types";
 
@@ -47,10 +47,11 @@ export class DraftManager {
     }
   }
 
-  async createGeneratedNote(title: string, content: string): Promise<TFile> {
-    await this.ensureFolder(AI_FOLDER);
+  async createGeneratedNote(title: string, content: string, folderPath = AI_FOLDER): Promise<TFile> {
+    const folder = normalizeGeneratedFolder(folderPath);
+    await this.ensureFolder(folder);
     const prefix = sanitizeFilename(title || "Generated Note");
-    const path = this.createUniqueDraftPath(AI_FOLDER, prefix);
+    const path = this.createUniqueDraftPath(folder, prefix);
     return this.plugin.app.vault.create(path, content);
   }
 
@@ -67,17 +68,23 @@ export class DraftManager {
   }
 
   private async ensureFolder(folderPath: string): Promise<void> {
-    const existing = this.plugin.app.vault.getAbstractFileByPath(folderPath);
+    const segments = folderPath.split("/").filter(Boolean);
+    let currentPath = "";
 
-    if (existing instanceof TFolder) {
-      return;
+    for (const segment of segments) {
+      currentPath = currentPath ? `${currentPath}/${segment}` : segment;
+      const existing = this.plugin.app.vault.getAbstractFileByPath(currentPath);
+
+      if (existing instanceof TFolder) {
+        continue;
+      }
+
+      if (existing instanceof TFile) {
+        throw new Error(`无法创建文件夹：${currentPath} 已经是一个文件。`);
+      }
+
+      await this.plugin.app.vault.createFolder(currentPath);
     }
-
-    if (existing instanceof TFile) {
-      throw new Error(`无法创建文件夹：${folderPath} 已经是一个文件。`);
-    }
-
-    await this.plugin.app.vault.createFolder(folderPath);
   }
 
   private createUniqueDraftPath(folderPath: string, prefix: string): string {
@@ -97,4 +104,15 @@ export class DraftManager {
 function sanitizeFilename(value: string): string {
   const sanitized = value.replace(/[\\/:*?"<>|#^[\]]+/g, " ").replace(/\s+/g, " ").trim();
   return sanitized || "Generated Note";
+}
+
+function normalizeGeneratedFolder(value: string): string {
+  const normalized = normalizePath(value.trim()).replace(/^\/+|\/+$/g, "");
+  const segments = normalized.split("/").filter(Boolean);
+
+  if (segments.length === 0 || segments.some((segment) => segment === "..")) {
+    return AI_FOLDER;
+  }
+
+  return segments.join("/");
 }

@@ -44,8 +44,11 @@ export class GenerateContentModal extends Modal {
     const { contentEl } = this;
     contentEl.empty();
     contentEl.addClass("ai-second-brain-generate-modal");
+    this.modalEl.addClass("ai-second-brain-generate-modal-shell");
 
-    const header = contentEl.createDiv({ cls: "ai-second-brain-modal-header" });
+    const scrollEl = contentEl.createDiv({ cls: "ai-second-brain-modal-scroll" });
+
+    const header = scrollEl.createDiv({ cls: "ai-second-brain-modal-header" });
     const icon = header.createDiv({ cls: "ai-second-brain-modal-icon" });
     setIcon(icon, "wand-sparkles");
     const headerText = header.createDiv({ cls: "ai-second-brain-modal-heading" });
@@ -55,7 +58,7 @@ export class GenerateContentModal extends Modal {
       text: "输入写作目标，先生成预览，再决定插入当前笔记或创建新笔记。"
     });
 
-    const form = contentEl.createDiv({ cls: "ai-second-brain-generate-form" });
+    const form = scrollEl.createDiv({ cls: "ai-second-brain-generate-form" });
 
     new Setting(form)
       .setName("提示词")
@@ -101,7 +104,7 @@ export class GenerateContentModal extends Modal {
         })
       );
 
-    const previewSection = contentEl.createDiv({ cls: "ai-second-brain-generate-preview-section" });
+    const previewSection = scrollEl.createDiv({ cls: "ai-second-brain-generate-preview-section" });
     const previewHeader = previewSection.createDiv({ cls: "ai-second-brain-generate-preview-header" });
     previewHeader.createDiv({ cls: "ai-second-brain-generate-preview-title", text: "预览" });
     this.previewStatusEl = previewHeader.createDiv({ cls: "ai-second-brain-generate-preview-status", text: "等待生成" });

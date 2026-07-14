@@ -7,6 +7,8 @@ import { DiffPreviewModal } from "../ui/diff-preview-modal";
 import { createIconButton } from "../ui/icon-button";
 import { StoredChatMessage, ViewChatMessage } from "./types";
 import { EditorChangeTransaction } from "../actions/editor-change-transaction";
+import { GenerateDiagramModal } from "../diagrams/generate-diagram-modal";
+import { AuthorizedFilesModal } from "../context/authorized-files-modal";
 
 export const AI_CHAT_VIEW_TYPE = "ai-second-brain-chat-view";
 
@@ -15,7 +17,8 @@ export class AIChatView extends ItemView {
   private inputEl?: HTMLTextAreaElement;
   private sessionSelectEl?: HTMLSelectElement;
   private scopeSelectEl?: HTMLSelectElement;
-  private scopeMetaEl?: HTMLElement;
+  private scopeMetaEl?: HTMLButtonElement;
+  private scopeMetaLabelEl?: HTMLElement;
   private sendButtonEl?: HTMLButtonElement;
   private stopButtonEl?: HTMLButtonElement;
   private newSessionButtonEl?: HTMLButtonElement;
@@ -81,10 +84,22 @@ export class AIChatView extends ItemView {
 
     const scopeControls = header.createDiv({ cls: "ai-second-brain-scope-controls" });
     this.scopeSelectEl = scopeControls.createEl("select", {
-      cls: "ai-second-brain-scope-select"
+      cls: "ai-second-brain-scope-select",
+      attr: { "aria-label": "切换 AI 授权范围" }
     });
 
-    this.scopeMetaEl = scopeControls.createDiv({ cls: "ai-second-brain-scope" });
+    this.scopeMetaEl = scopeControls.createEl("button", {
+      cls: "ai-second-brain-scope",
+      attr: { type: "button", "aria-label": "查看已授权文件" }
+    });
+    const scopeIcon = this.scopeMetaEl.createSpan({ cls: "ai-second-brain-scope-icon" });
+    setIcon(scopeIcon, "files");
+    this.scopeMetaLabelEl = this.scopeMetaEl.createSpan({ cls: "ai-second-brain-scope-label" });
+    const scopeOpenIcon = this.scopeMetaEl.createSpan({ cls: "ai-second-brain-scope-open" });
+    setIcon(scopeOpenIcon, "chevron-right");
+    this.scopeMetaEl.addEventListener("click", () => {
+      void this.openAuthorizedFiles();
+    });
     this.refreshScopeControls();
 
     this.scopeSelectEl.addEventListener("focus", () => {
@@ -96,6 +111,32 @@ export class AIChatView extends ItemView {
     this.scopeSelectEl.addEventListener("change", () => {
       void this.plugin.setActiveContextScope(this.scopeSelectEl?.value || "").then(() => this.refreshScopeControls());
     });
+
+    this.registerEvent(
+      this.app.workspace.on("active-leaf-change", () => {
+        this.refreshScopeControls();
+      })
+    );
+    this.registerEvent(
+      this.app.workspace.on("file-open", () => {
+        this.refreshScopeControls();
+      })
+    );
+    this.registerEvent(
+      this.app.vault.on("rename", () => {
+        this.refreshScopeControls();
+      })
+    );
+    this.registerEvent(
+      this.app.vault.on("create", () => {
+        this.refreshScopeControls();
+      })
+    );
+    this.registerEvent(
+      this.app.vault.on("delete", () => {
+        this.refreshScopeControls();
+      })
+    );
 
     this.messagesEl = container.createDiv({ cls: "ai-second-brain-messages" });
     this.renderMessages();
@@ -137,6 +178,7 @@ export class AIChatView extends ItemView {
     this.sessionSelectEl = undefined;
     this.scopeSelectEl = undefined;
     this.scopeMetaEl = undefined;
+    this.scopeMetaLabelEl = undefined;
     this.sendButtonEl = undefined;
     this.stopButtonEl = undefined;
     this.newSessionButtonEl = undefined;
@@ -351,6 +393,19 @@ export class AIChatView extends ItemView {
     const copyButton = createIconButton(actions, "copy", "复制");
     copyButton.addEventListener("click", () => {
       void this.copyMessage(message.content);
+    });
+
+    const diagramButton = createIconButton(actions, "workflow", "生成图谱");
+    diagramButton.addEventListener("click", () => {
+      const view = this.plugin.getEditableMarkdownView();
+      new GenerateDiagramModal(
+        this.app,
+        this.plugin,
+        view?.editor,
+        view?.file || undefined,
+        message.content,
+        message.citations
+      ).open();
     });
 
     const insertButton = createIconButton(actions, "corner-down-left", "插入到光标");
@@ -651,7 +706,7 @@ export class AIChatView extends ItemView {
   }
 
   private refreshScopeControls(): void {
-    if (!this.scopeSelectEl || !this.scopeMetaEl) {
+    if (!this.scopeSelectEl || !this.scopeMetaEl || !this.scopeMetaLabelEl) {
       return;
     }
 
@@ -659,17 +714,56 @@ export class AIChatView extends ItemView {
     this.scopeSelectEl.empty();
 
     for (const scope of this.plugin.settings.contextScopes) {
+      const files = this.plugin.contextScopeResolver.resolve(scope);
+      const label = scope.mode === "current-file"
+        ? files[0]?.name || "未打开 Markdown 笔记"
+        : scope.name;
       this.scopeSelectEl.createEl("option", {
         value: scope.id,
-        text: scope.name
+        text: label
       });
     }
 
     this.scopeSelectEl.value = currentValue;
     const selectedScope = this.plugin.getActiveContextScope();
-    const count = this.plugin.countFilesInContextScope(selectedScope);
-    this.scopeMetaEl.setText(selectedScope ? `${count} 个授权文件` : "未选择上下文");
+    const files = this.plugin.contextScopeResolver.resolve(selectedScope);
+    this.scopeMetaLabelEl.setText(selectedScope ? formatAuthorizedFileNames(files) : "未选择上下文");
+    this.scopeMetaEl.disabled = files.length === 0;
+    this.scopeMetaEl.title = files.length > 0 ? files.map((file) => file.path).join("\n") : "当前没有授权文件";
   }
+
+  private async openAuthorizedFiles(): Promise<void> {
+    const scope = this.plugin.getActiveContextScope();
+    const files = this.plugin.contextScopeResolver.resolve(scope);
+
+    if (files.length === 0) {
+      return;
+    }
+
+    if (files.length === 1) {
+      try {
+        await this.app.workspace.getLeaf(false).openFile(files[0]);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        new Notice(`无法打开授权文件：${message}`);
+      }
+      return;
+    }
+
+    new AuthorizedFilesModal(this.app, scope?.name || "当前授权范围", files).open();
+  }
+}
+
+function formatAuthorizedFileNames(files: TFile[]): string {
+  if (files.length === 0) {
+    return "未授权任何文件";
+  }
+
+  if (files.length <= 2) {
+    return files.map((file) => file.name).join("、");
+  }
+
+  return `${files.slice(0, 2).map((file) => file.name).join("、")} 等 ${files.length} 个文件`;
 }
 
 function toViewMessage(message: StoredChatMessage): ViewChatMessage {

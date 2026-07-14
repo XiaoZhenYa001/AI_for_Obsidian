@@ -9,6 +9,9 @@ export const DEFAULT_SETTINGS: ObsidianAISettings = {
   promptTemplates: BUILT_IN_PROMPT_TEMPLATES.map((t) => ({ ...t })),
   chatSessions: [],
   activeChatSessionId: "",
+  diagramFolder: "AI Second Brain/Diagrams",
+  diagramMaxNodes: 24,
+  diagramAutoEmbed: true,
   contextScopes: [
     {
       id: "current-file",

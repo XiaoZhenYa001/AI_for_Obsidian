@@ -3,7 +3,10 @@ import { readFrontmatterTags } from "../utils/frontmatter";
 import { ContextScope } from "./scope-types";
 
 export class ContextScopeResolver {
-  constructor(private readonly app: App) {}
+  constructor(
+    private readonly app: App,
+    private readonly getCurrentFile?: () => TFile | undefined
+  ) {}
 
   resolve(scope: ContextScope | undefined): TFile[] {
     if (!scope) {
@@ -11,8 +14,8 @@ export class ContextScopeResolver {
     }
 
     if (scope.mode === "current-file") {
-      const activeFile = this.app.workspace.getActiveFile();
-      return activeFile ? [activeFile] : [];
+      const activeFile = this.getCurrentFile?.() || this.app.workspace.getActiveFile() || undefined;
+      return activeFile?.extension === "md" ? [activeFile] : [];
     }
 
     const markdownFiles = this.app.vault.getMarkdownFiles();
