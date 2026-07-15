@@ -56,7 +56,7 @@ export class DraftManager {
   }
 
   async createHealthReport(): Promise<KnowledgeHealthReport | undefined> {
-    const scope = this.plugin.contextScopeManager.getActive();
+    const scope = this.plugin.getActiveContextScope();
     const files = this.plugin.contextScopeResolver.resolve(scope);
 
     if (files.length === 0) {

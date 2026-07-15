@@ -15,9 +15,13 @@ export type ChatOptions = {
   model?: string;
   temperature?: number;
   contextScopeId?: string;
+  contextScope?: ContextScope;
   signal?: AbortSignal;
   history?: ChatMessage[];
   retrievalQuery?: string;
+  contextFilePaths?: string[];
+  lockedFilePaths?: string[];
+  systemInstruction?: string;
 };
 
 export type ChatStreamResult = {
@@ -32,10 +36,7 @@ export class ChatService {
     const payload = await this.buildChatPayload(content, options);
 
     if (!payload.provider) {
-      return {
-        content: payload.fallbackContent,
-        citations: []
-      };
+      throw new Error(payload.fallbackContent);
     }
 
     const response = await payload.provider.chat(payload.request);
@@ -107,7 +108,7 @@ export class ChatService {
     const retrievedContext =
       options.useContext === false
         ? { summary: "", citations: [] }
-        : await this.buildRetrievedContext(options.retrievalQuery || content, contextScope);
+        : await this.buildRetrievedContext(options.retrievalQuery || content, contextScope, options);
     const messages: ChatMessage[] = [
       {
         role: "system",
@@ -115,6 +116,13 @@ export class ChatService {
           "你是 Obsidian 中的 AI 第二大脑助手。回答应清晰、准确、克制。若使用了授权笔记上下文，请尽量用 [1]、[2] 这样的编号标注依据；如果上下文不足，请直接说明。"
       }
     ];
+
+    if (options.systemInstruction?.trim()) {
+      messages.push({
+        role: "system",
+        content: `当前对话职责：${options.systemInstruction.trim()}`
+      });
+    }
 
     if (retrievedContext.summary) {
       messages.push({
@@ -150,9 +158,22 @@ export class ChatService {
 
   private async buildRetrievedContext(
     query: string,
-    scope?: ContextScope
+    scope: ContextScope | undefined,
+    options: ChatOptions
   ): Promise<{ summary: string; citations: Citation[] }> {
-    const files = this.plugin.contextScopeResolver.resolve(scope);
+    const authorizedFiles = this.plugin.contextScopeResolver.resolve(scope);
+    const authorizedByPath = new Map(authorizedFiles.map((file) => [file.path, file]));
+    const selectedFiles = options.contextFilePaths === undefined
+      ? authorizedFiles
+      : options.contextFilePaths.flatMap((path) => {
+          const file = authorizedByPath.get(path);
+          return file ? [file] : [];
+        });
+    const lockedFiles = (options.lockedFilePaths || []).flatMap((path) => {
+      const file = authorizedByPath.get(path);
+      return file ? [file] : [];
+    });
+    const files = uniqueFiles([...selectedFiles, ...lockedFiles]);
 
     if (files.length === 0) {
       return {
@@ -161,7 +182,18 @@ export class ChatService {
       };
     }
 
-    const retrievedChunks = await this.plugin.textSearchService.search(query, files, 6);
+    const retrievedChunks = await this.plugin.textSearchService.search(query, files, 8);
+    const retrievedIds = new Set(retrievedChunks.map((chunk) => chunk.id));
+    const representedLockedPaths = new Set(retrievedChunks.map((chunk) => chunk.filePath));
+    const missingLockedFiles = lockedFiles.filter((file) => !representedLockedPaths.has(file.path));
+    const lockedChunks = await this.plugin.textSearchService.getRepresentativeChunks(missingLockedFiles);
+
+    for (const chunk of lockedChunks) {
+      if (!retrievedIds.has(chunk.id)) {
+        retrievedChunks.push(chunk);
+        retrievedIds.add(chunk.id);
+      }
+    }
 
     if (retrievedChunks.length === 0) {
       return {
@@ -181,10 +213,14 @@ export class ChatService {
       return undefined;
     }
 
-    return options.contextScopeId
+    return options.contextScope || (options.contextScopeId
       ? this.plugin.settings.contextScopes.find((item) => item.id === options.contextScopeId)
-      : this.plugin.getActiveContextScope();
+      : this.plugin.getActiveContextScope());
   }
+}
+
+function uniqueFiles<T extends { path: string }>(files: T[]): T[] {
+  return Array.from(new Map(files.map((file) => [file.path, file])).values());
 }
 
 function trimHistory(history: ChatMessage[]): ChatMessage[] {

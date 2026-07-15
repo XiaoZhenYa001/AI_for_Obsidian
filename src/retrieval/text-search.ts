@@ -20,6 +20,12 @@ export type TextIndexStats = {
   lastRebuildAt?: string;
 };
 
+export type RelevantFile = {
+  filePath: string;
+  score: number;
+  matchedChunks: number;
+};
+
 export class TextSearchService {
   private index = new Map<string, IndexedFile>();
   private lastRebuildAt?: string;
@@ -96,6 +102,46 @@ export class TextSearchService {
     }
 
     return fallbackResults.slice(0, limit);
+  }
+
+  async rankFiles(query: string, files: TFile[], limit = 6): Promise<RelevantFile[]> {
+    const chunks = await this.search(query, files, Math.max(limit * 6, 36));
+    const ranked = new Map<string, RelevantFile>();
+
+    for (const chunk of chunks) {
+      const current = ranked.get(chunk.filePath);
+
+      if (current) {
+        current.score += chunk.score;
+        current.matchedChunks += 1;
+      } else {
+        ranked.set(chunk.filePath, {
+          filePath: chunk.filePath,
+          score: chunk.score,
+          matchedChunks: 1
+        });
+      }
+    }
+
+    return Array.from(ranked.values())
+      .sort((a, b) => b.score - a.score || a.filePath.localeCompare(b.filePath))
+      .slice(0, limit);
+  }
+
+  async getRepresentativeChunks(files: TFile[], limitPerFile = 1): Promise<RetrievedChunk[]> {
+    const results: RetrievedChunk[] = [];
+
+    for (const file of files) {
+      const indexedFile = await this.ensureIndexed(file);
+      results.push(
+        ...indexedFile.chunks.slice(0, limitPerFile).map((chunk) => ({
+          ...chunk,
+          score: 0.05
+        }))
+      );
+    }
+
+    return results;
   }
 
   private async ensureIndexed(file: TFile): Promise<IndexedFile> {

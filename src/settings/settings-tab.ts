@@ -831,7 +831,8 @@ export class ObsidianAISettingTab extends PluginSettingTab {
 
   private createIconButton(containerEl: HTMLElement, icon: IconName, text: string, className = ""): HTMLButtonElement {
     const button = containerEl.createEl("button", {
-      cls: ["ai-second-brain-icon-button", className].filter(Boolean).join(" ")
+      cls: ["ai-second-brain-icon-button", className].filter(Boolean).join(" "),
+      attr: { type: "button", title: text, "aria-label": text }
     });
     const iconEl = button.createSpan({ cls: "ai-second-brain-button-icon" });
     setIcon(iconEl, icon);

@@ -4,6 +4,7 @@ export function createIconButton(container: HTMLElement, icon: IconName, text: s
   const button = container.createEl("button", {
     cls: ["ai-second-brain-icon-button", className].filter(Boolean).join(" "),
     attr: {
+      type: "button",
       "aria-label": text,
       title: text
     }

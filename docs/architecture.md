@@ -174,13 +174,19 @@ type ChatSession = {
   id: string;
   title: string;
   contextScopeId: string;
+  purpose: string;
+  autoContext: boolean;
+  lockedFilePaths: string[];
+  lastContextFilePaths: string[];
   messages: ChatMessage[];
   createdAt: string;
   updatedAt: string;
 };
 ```
 
-每个会话独立保存消息和上下文范围。旧版本的单一聊天记录在加载时迁移为一个历史会话。
+每个会话独立保存消息、职责、上下文范围、锁定文件和最近确认的文件集合。旧版本的单一聊天记录在加载时迁移为一个历史会话。
+
+会话使用独立的逻辑索引边界，但底层共享按文件内容生成的本地片段缓存。检索只能查询该会话授权范围内的文件；共享缓存仅用于避免重复读取未变化的文件，不会扩大授权范围。
 
 ## 5. 核心流程
 
@@ -188,8 +194,10 @@ type ChatSession = {
 
 ```text
 用户输入问题
-→ 读取当前激活上下文范围
+→ 读取当前会话的职责和上下文范围
 → 解析授权文件列表
+→ 本地筛选相关文件并合并锁定文件
+→ 用户确认本轮文件集合
 → 检索相关片段
 → 构建 Prompt
 → 调用选定 AI Provider
@@ -223,6 +231,8 @@ type ChatSession = {
 → 写入本地索引
 → 文件变更时增量更新
 ```
+
+文件缓存以路径、修改时间和大小识别版本。修改、删除或重命名只使对应文件缓存失效；后续检索按需重新分块，不重复扫描未变化文件。
 
 ### 5.4 可编辑图谱生成流程
 

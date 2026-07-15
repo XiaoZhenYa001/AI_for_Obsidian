@@ -29,7 +29,7 @@ export class GenerateContentModal extends Modal {
   ) {
     super(app);
     this.outputTarget = editor ? "insert" : "new-note";
-    const activeFile = plugin.app.workspace.getActiveFile();
+    const activeFile = editor ? plugin.getMarkdownViewForEditor(editor)?.file : undefined;
 
     if (editor && activeFile) {
       this.insertionTarget = EditorChangeTransaction.captureInsertion(editor, activeFile.path);
@@ -176,7 +176,7 @@ export class GenerateContentModal extends Modal {
       return;
     }
 
-    const currentFile = this.plugin.getEditableMarkdownView()?.file;
+    const currentFile = this.plugin.getMarkdownViewForEditor(this.editor)?.file;
     const result = this.insertionTarget.apply(this.generatedContent, currentFile?.path);
 
     if (!result.applied) {

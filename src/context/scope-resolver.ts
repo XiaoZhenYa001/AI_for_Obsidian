@@ -33,6 +33,11 @@ export class ContextScopeResolver {
         return scope.folders.some((folder) => file.path.startsWith(`${folder.replace(/\/$/, "")}/`));
       }
 
+      if (scope.mode === "mixed") {
+        return scope.files.includes(file.path) ||
+          scope.folders.some((folder) => file.path.startsWith(`${folder.replace(/\/$/, "")}/`));
+      }
+
       if (scope.mode === "tags") {
         const cache = this.app.metadataCache.getFileCache(file);
         const tags = [

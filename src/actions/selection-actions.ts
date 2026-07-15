@@ -36,7 +36,7 @@ export async function runSelectionAction(
     return;
   }
 
-  const activeFile = plugin.app.workspace.getActiveFile();
+  const activeFile = plugin.getMarkdownViewForEditor(editor)?.file;
   const change = activeFile ? EditorChangeTransaction.captureSelection(editor, activeFile.path) : undefined;
 
   if (!change) {
@@ -68,7 +68,7 @@ export async function runSelectionAction(
 
     if (template.outputMode === "replace-selection") {
       new DiffPreviewModal(plugin.app, selection, response.content, (value) => {
-        const result = change.apply(value, plugin.app.workspace.getActiveFile()?.path);
+        const result = change.apply(value, plugin.getMarkdownViewForEditor(editor)?.file?.path);
 
         if (!result.applied) {
           new Notice(result.reason);
@@ -82,7 +82,7 @@ export async function runSelectionAction(
 
     const result = change.apply(
       `${selection}\n\n> AI ${ACTION_LABELS[action]}：${response.content}`,
-      plugin.app.workspace.getActiveFile()?.path
+      plugin.getMarkdownViewForEditor(editor)?.file?.path
     );
 
     if (!result.applied) {

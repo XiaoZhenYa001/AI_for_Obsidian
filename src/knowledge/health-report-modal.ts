@@ -23,7 +23,7 @@ export class KnowledgeHealthReportModal extends Modal {
     });
 
     const actions = contentEl.createDiv({ cls: "ai-second-brain-health-actions" });
-    const mocButton = actions.createEl("button", { text: "生成 MOC 草稿" });
+    const mocButton = actions.createEl("button", { text: "生成 MOC 草稿", attr: { type: "button" } });
     mocButton.addEventListener("click", () => {
       void this.onCreateMoc().catch((error) => {
         const message = error instanceof Error ? error.message : String(error);
@@ -118,7 +118,7 @@ export class KnowledgeHealthReportModal extends Modal {
   }
 
   private renderNoteButton(container: HTMLElement, note: KnowledgeNote): void {
-    const button = container.createEl("button", { cls: "ai-second-brain-health-note" });
+    const button = container.createEl("button", { cls: "ai-second-brain-health-note", attr: { type: "button" } });
     button.createSpan({ cls: "ai-second-brain-health-note-title", text: note.title });
     button.createSpan({ cls: "ai-second-brain-health-note-path", text: note.path });
 
@@ -132,7 +132,7 @@ export class KnowledgeHealthReportModal extends Modal {
   }
 
   private renderSuggestion(container: HTMLElement, suggestion: LinkSuggestion): void {
-    const button = container.createEl("button", { cls: "ai-second-brain-health-note" });
+    const button = container.createEl("button", { cls: "ai-second-brain-health-note", attr: { type: "button" } });
     button.createSpan({
       cls: "ai-second-brain-health-note-title",
       text: `${suggestion.sourcePath} → ${suggestion.targetTitle}`
@@ -155,4 +155,3 @@ export class KnowledgeHealthReportModal extends Modal {
     this.close();
   }
 }
-

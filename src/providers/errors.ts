@@ -63,10 +63,13 @@ export function normalizeProviderError(error: unknown, providerName: string): Pr
 }
 
 export function isAbortError(error: unknown): boolean {
+  if (error instanceof ProviderError && error.code === "aborted") {
+    return true;
+  }
+
   if (error instanceof DOMException && error.name === "AbortError") {
     return true;
   }
 
   return error instanceof Error && error.name === "AbortError";
 }
-

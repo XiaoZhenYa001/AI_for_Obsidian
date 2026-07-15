@@ -53,10 +53,19 @@ export class DiagramService {
       source.allowedPaths,
       this.plugin.settings.diagramMaxNodes
     );
+    const activeSession = this.plugin.getActiveChatSession();
     const response = await this.plugin.chatService.sendMessage(prompt, {
       useContext: options.sourceMode === "context",
       providerId: provider.id,
       retrievalQuery: options.focus || options.title || `${DIAGRAM_TYPE_LABELS[options.type]} 关键概念与关系`,
+      contextScopeId: activeSession.contextScopeId,
+      contextScope: this.plugin.getChatSessionContextScope(activeSession),
+      contextFilePaths:
+        options.sourceMode === "context" && activeSession.autoContext && activeSession.lastContextFilePaths.length > 0
+          ? activeSession.lastContextFilePaths
+          : undefined,
+      lockedFilePaths: options.sourceMode === "context" ? activeSession.lockedFilePaths : undefined,
+      systemInstruction: activeSession.purpose,
       signal: options.signal
     });
     throwIfAborted(options.signal);
@@ -180,6 +189,7 @@ function buildDiagramPrompt(
     "- 节点文字简洁，单个节点不超过 40 个汉字。",
     "- id 必须唯一，边只能引用已存在的节点。",
     "- primary 只用于核心节点，decision 只用于判断或分支节点。",
+    ...getDiagramTypeRules(options.type),
     "- sourcePath 只能从允许的来源路径中选择，不确定时省略。",
     options.sourceMode === "context"
       ? "sourcePath 只能使用检索上下文片段中明确给出的文件路径。"
@@ -189,6 +199,23 @@ function buildDiagramPrompt(
     sourceContent,
     "</source_material>"
   ].join("\n");
+}
+
+function getDiagramTypeRules(type: GenerateDiagramOptions["type"]): string[] {
+  switch (type) {
+    case "mind-map":
+      return ["- 以一个核心主题为根节点，使用主题到子主题的层级关系，避免跨层级杂乱连线。"];
+    case "flowchart":
+      return ["- 按实际执行顺序组织步骤；条件判断使用 decision，并为分支边标注条件。"];
+    case "timeline":
+      return ["- 节点按时间先后排列；节点文字包含明确时间，边表示时间推进或阶段变化。"];
+    case "knowledge-map":
+      return ["- 优先表达概念间的因果、组成、对比、依赖等语义，并为关系边添加简短标签。"];
+    case "architecture":
+      return ["- 按层级、子系统或边界组织组件；边应表达调用、数据流或依赖方向。"];
+    case "decision-tree":
+      return ["- 从一个明确问题开始；判断节点使用 decision，分支边必须标注条件，叶节点表示结论或行动。"];
+  }
 }
 
 function createCitation(path: string, content: string): Citation {

@@ -117,7 +117,7 @@ export class EditorSubmenuController {
   }
 
   private clearCloseTimer(): void {
-    if (!this.closeTimer) {
+    if (this.closeTimer === undefined) {
       return;
     }
 

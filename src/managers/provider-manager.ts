@@ -24,12 +24,14 @@ export class ProviderManager {
       (provider) => provider.id !== providerId
     );
 
+    const fallbackProviderId = this.plugin.settings.providers.find((provider) => provider.enabled)?.id || "";
+
     if (this.plugin.settings.defaultChatProviderId === providerId) {
-      this.plugin.settings.defaultChatProviderId = this.plugin.settings.providers[0]?.id || "";
+      this.plugin.settings.defaultChatProviderId = fallbackProviderId;
     }
 
     if (this.plugin.settings.defaultEditProviderId === providerId) {
-      this.plugin.settings.defaultEditProviderId = this.plugin.settings.providers[0]?.id || "";
+      this.plugin.settings.defaultEditProviderId = fallbackProviderId;
     }
 
     await this.plugin.saveSettings();

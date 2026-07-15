@@ -81,14 +81,20 @@ export abstract class BaseProvider implements AIProvider {
         signal: request.signal,
       });
 
-      const data = (await response.json()) as unknown;
+      const responseText = await response.text();
+      const data = parseResponseBody(responseText);
 
       if (!response.ok) {
+        const providerMessage = data === undefined ? undefined : this.extractErrorMessage(data);
         throw httpError(
           this.config.name,
           response.status,
-          this.extractErrorMessage(data),
+          providerMessage || compactErrorBody(responseText) || undefined,
         );
+      }
+
+      if (data === undefined) {
+        throw invalidResponse(this.config.name, "Response body is not valid JSON.");
       }
 
       const content = this.extractContent(data);
@@ -190,4 +196,21 @@ export abstract class BaseProvider implements AIProvider {
       throw normalizeProviderError(error, this.config.name);
     }
   }
+}
+
+function parseResponseBody(value: string): unknown | undefined {
+  if (!value.trim()) {
+    return undefined;
+  }
+
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return undefined;
+  }
+}
+
+function compactErrorBody(value: string): string {
+  const compact = value.replace(/\s+/g, " ").trim();
+  return compact.length > 500 ? `${compact.slice(0, 500)}...` : compact;
 }

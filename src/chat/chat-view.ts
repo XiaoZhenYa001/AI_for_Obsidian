@@ -1,31 +1,36 @@
-import { Component, ItemView, MarkdownRenderer, Notice, setIcon, TFile, WorkspaceLeaf } from "obsidian";
+import { App, Component, FuzzySuggestModal, ItemView, MarkdownRenderer, Notice, setIcon, TFile, WorkspaceLeaf } from "obsidian";
 import type ObsidianAIPlugin from "../main";
 import { isAbortError } from "../providers/errors";
 import { ChatMessage } from "../providers/types";
 import { Citation } from "../retrieval/types";
 import { DiffPreviewModal } from "../ui/diff-preview-modal";
 import { createIconButton } from "../ui/icon-button";
-import { StoredChatMessage, ViewChatMessage } from "./types";
+import { StoredChatMessage, StoredChatSession, ViewChatMessage } from "./types";
 import { EditorChangeTransaction } from "../actions/editor-change-transaction";
 import { GenerateDiagramModal } from "../diagrams/generate-diagram-modal";
-import { AuthorizedFilesModal } from "../context/authorized-files-modal";
+import { confirmContextSelection } from "../context/context-selection-modal";
+import { configureChatSession } from "./chat-session-modal";
+import { ContextScope } from "../context/scope-types";
+import { pickContextSource } from "../context/context-source-picker-modal";
 
 export const AI_CHAT_VIEW_TYPE = "ai-second-brain-chat-view";
 
 export class AIChatView extends ItemView {
   private messagesEl?: HTMLElement;
   private inputEl?: HTMLTextAreaElement;
-  private sessionSelectEl?: HTMLSelectElement;
-  private scopeSelectEl?: HTMLSelectElement;
-  private scopeMetaEl?: HTMLButtonElement;
-  private scopeMetaLabelEl?: HTMLElement;
+  private sessionSwitcherButtonEl?: HTMLButtonElement;
+  private scopePickerEl?: HTMLButtonElement;
+  private scopeIconEl?: HTMLElement;
+  private scopeLabelEl?: HTMLElement;
   private sendButtonEl?: HTMLButtonElement;
   private stopButtonEl?: HTMLButtonElement;
   private newSessionButtonEl?: HTMLButtonElement;
+  private sessionSettingsButtonEl?: HTMLButtonElement;
   private clearButtonEl?: HTMLButtonElement;
   private messages: ViewChatMessage[] = [];
   private activeSessionId = "";
   private isGenerating = false;
+  private isPreparingContext = false;
   private abortController?: AbortController;
   private expandedCitationKeys = new Set<string>();
   private messageRenderComponents: Component[] = [];
@@ -65,52 +70,45 @@ export class AIChatView extends ItemView {
       void this.startNewSession();
     });
 
+    this.sessionSwitcherButtonEl = createIconButton(
+      headerActions,
+      "messages-square",
+      "切换对话",
+      "ai-second-brain-session-switcher"
+    );
+    this.sessionSwitcherButtonEl.addEventListener("click", () => {
+      this.openSessionSwitcher();
+    });
+
+    this.sessionSettingsButtonEl = createIconButton(
+      headerActions,
+      "settings-2",
+      "当前对话设置",
+      "ai-second-brain-session-settings"
+    );
+    this.sessionSettingsButtonEl.addEventListener("click", () => {
+      void this.editCurrentSession();
+    });
+
     this.clearButtonEl = createIconButton(headerActions, "trash-2", "清空当前对话", "ai-second-brain-clear");
     this.clearButtonEl.addEventListener("click", () => {
       void this.clearMessages();
     });
 
-    const sessionControls = header.createDiv({ cls: "ai-second-brain-session-controls" });
-    const sessionIcon = sessionControls.createSpan({ cls: "ai-second-brain-session-icon" });
-    setIcon(sessionIcon, "messages-square");
-    this.sessionSelectEl = sessionControls.createEl("select", {
-      cls: "ai-second-brain-session-select",
-      attr: { "aria-label": "切换对话" }
-    });
     this.refreshSessionControls();
-    this.sessionSelectEl.addEventListener("change", () => {
-      void this.switchSession(this.sessionSelectEl?.value || "");
-    });
 
-    const scopeControls = header.createDiv({ cls: "ai-second-brain-scope-controls" });
-    this.scopeSelectEl = scopeControls.createEl("select", {
-      cls: "ai-second-brain-scope-select",
-      attr: { "aria-label": "切换 AI 授权范围" }
+    this.scopePickerEl = header.createEl("button", {
+      cls: "ai-second-brain-scope-controls",
+      attr: { type: "button", "aria-label": "选择 AI 可访问的文件或文件夹" }
     });
-
-    this.scopeMetaEl = scopeControls.createEl("button", {
-      cls: "ai-second-brain-scope",
-      attr: { type: "button", "aria-label": "查看已授权文件" }
-    });
-    const scopeIcon = this.scopeMetaEl.createSpan({ cls: "ai-second-brain-scope-icon" });
-    setIcon(scopeIcon, "files");
-    this.scopeMetaLabelEl = this.scopeMetaEl.createSpan({ cls: "ai-second-brain-scope-label" });
-    const scopeOpenIcon = this.scopeMetaEl.createSpan({ cls: "ai-second-brain-scope-open" });
-    setIcon(scopeOpenIcon, "chevron-right");
-    this.scopeMetaEl.addEventListener("click", () => {
-      void this.openAuthorizedFiles();
+    this.scopeIconEl = this.scopePickerEl.createSpan({ cls: "ai-second-brain-scope-picker-icon" });
+    this.scopeLabelEl = this.scopePickerEl.createSpan({ cls: "ai-second-brain-scope-picker-label" });
+    const scopeChevron = this.scopePickerEl.createSpan({ cls: "ai-second-brain-scope-picker-chevron" });
+    setIcon(scopeChevron, "chevron-down");
+    this.scopePickerEl.addEventListener("click", () => {
+      void this.openContextSourcePicker();
     });
     this.refreshScopeControls();
-
-    this.scopeSelectEl.addEventListener("focus", () => {
-      this.refreshScopeControls();
-    });
-    this.scopeSelectEl.addEventListener("pointerdown", () => {
-      this.refreshScopeControls();
-    });
-    this.scopeSelectEl.addEventListener("change", () => {
-      void this.plugin.setActiveContextScope(this.scopeSelectEl?.value || "").then(() => this.refreshScopeControls());
-    });
 
     this.registerEvent(
       this.app.workspace.on("active-leaf-change", () => {
@@ -175,18 +173,19 @@ export class AIChatView extends ItemView {
     this.clearMessageRenderComponents();
     this.messagesEl = undefined;
     this.inputEl = undefined;
-    this.sessionSelectEl = undefined;
-    this.scopeSelectEl = undefined;
-    this.scopeMetaEl = undefined;
-    this.scopeMetaLabelEl = undefined;
+    this.sessionSwitcherButtonEl = undefined;
+    this.scopePickerEl = undefined;
+    this.scopeIconEl = undefined;
+    this.scopeLabelEl = undefined;
     this.sendButtonEl = undefined;
     this.stopButtonEl = undefined;
     this.newSessionButtonEl = undefined;
+    this.sessionSettingsButtonEl = undefined;
     this.clearButtonEl = undefined;
   }
 
   private async submit(): Promise<void> {
-    if (this.isGenerating) {
+    if (this.isGenerating || this.isPreparingContext) {
       return;
     }
 
@@ -194,6 +193,38 @@ export class AIChatView extends ItemView {
 
     if (!content) {
       return;
+    }
+
+    const session = this.plugin.getActiveChatSession();
+    let contextFilePaths: string[] | undefined;
+
+    if (session.autoContext) {
+      this.setPreparingContext(true);
+
+      try {
+        const scope = this.plugin.getChatSessionContextScope(session);
+        const files = this.plugin.contextScopeResolver.resolve(scope);
+        const relevantFiles = await this.plugin.textSearchService.rankFiles(content, files, 6);
+        const result = await confirmContextSelection(this.app, {
+          scopeName: scope?.name || "当前授权范围",
+          files,
+          relevantFiles,
+          lockedFilePaths: session.lockedFilePaths
+        });
+
+        if (!result) {
+          return;
+        }
+
+        contextFilePaths = result.selectedFilePaths;
+        await this.plugin.saveChatSessionContext(session.id, result.selectedFilePaths, result.lockedFilePaths);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        new Notice(`准备上下文失败：${message}`);
+        return;
+      } finally {
+        this.setPreparingContext(false);
+      }
     }
 
     const history = toProviderHistory(this.messages);
@@ -215,7 +246,12 @@ export class AIChatView extends ItemView {
     try {
       const response = await this.plugin.chatService.streamMessage(content, {
         signal: this.abortController.signal,
-        history
+        history,
+        contextScopeId: session.contextScopeId,
+        contextScope: this.plugin.getChatSessionContextScope(session),
+        contextFilePaths,
+        lockedFilePaths: session.lockedFilePaths,
+        systemInstruction: session.purpose
       });
       assistantMessage.citations = response.citations;
 
@@ -435,7 +471,8 @@ export class AIChatView extends ItemView {
       item.toggleClass("is-expanded", isExpanded);
 
       const summary = item.createEl("button", {
-        cls: "ai-second-brain-citation-summary"
+        cls: "ai-second-brain-citation-summary",
+        attr: { type: "button" }
       });
       const sourceIcon = summary.createSpan({ cls: "ai-second-brain-citation-icon" });
       setIcon(sourceIcon, "file-text");
@@ -549,8 +586,13 @@ export class AIChatView extends ItemView {
   }
 
   private async createNoteFromMessage(content: string): Promise<void> {
-    const file = await this.plugin.createGeneratedNote("AI Chat Result", content);
-    await this.app.workspace.getLeaf(false).openFile(file);
+    try {
+      const file = await this.plugin.createGeneratedNote("AI Chat Result", content);
+      await this.app.workspace.getLeaf(false).openFile(file);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      new Notice(`创建笔记失败：${message}`);
+    }
   }
 
   private async copyMessage(content: string): Promise<void> {
@@ -568,13 +610,18 @@ export class AIChatView extends ItemView {
       return;
     }
 
-    if (this.messages.length === 0) {
-      this.inputEl?.focus();
+    const config = await configureChatSession(this.app, {
+      mode: "create",
+      scopes: this.plugin.settings.contextScopes,
+      defaultScopeId: this.plugin.settings.activeContextScopeId
+    });
+
+    if (!config) {
       return;
     }
 
     this.rememberCurrentDraft();
-    const session = await this.plugin.createChatSession();
+    const session = await this.plugin.createChatSession(config);
     this.activeSessionId = session.id;
     this.messages = [];
     this.expandedCitationKeys.clear();
@@ -583,6 +630,28 @@ export class AIChatView extends ItemView {
     this.renderMessages();
     this.restoreSessionDraft();
     this.inputEl?.focus();
+  }
+
+  private async editCurrentSession(): Promise<void> {
+    if (this.isGenerating || this.isPreparingContext) {
+      return;
+    }
+
+    const session = this.plugin.getActiveChatSession();
+    const config = await configureChatSession(this.app, {
+      mode: "edit",
+      scopes: this.plugin.settings.contextScopes,
+      session,
+      defaultScopeId: session.contextScopeId
+    });
+
+    if (!config) {
+      return;
+    }
+
+    await this.plugin.updateChatSession(session.id, config);
+    this.refreshSessionControls();
+    this.refreshScopeControls();
   }
 
   private async switchSession(sessionId: string): Promise<void> {
@@ -653,12 +722,20 @@ export class AIChatView extends ItemView {
       this.stopButtonEl.style.display = value ? "" : "none";
     }
 
-    if (this.sessionSelectEl) {
-      this.sessionSelectEl.disabled = value;
+    if (this.sessionSwitcherButtonEl) {
+      this.sessionSwitcherButtonEl.disabled = value;
+    }
+
+    if (this.scopePickerEl) {
+      this.scopePickerEl.disabled = value;
     }
 
     if (this.newSessionButtonEl) {
       this.newSessionButtonEl.disabled = value;
+    }
+
+    if (this.sessionSettingsButtonEl) {
+      this.sessionSettingsButtonEl.disabled = value;
     }
 
     if (this.clearButtonEl) {
@@ -666,21 +743,52 @@ export class AIChatView extends ItemView {
     }
   }
 
+  private setPreparingContext(value: boolean): void {
+    this.isPreparingContext = value;
+
+    if (this.sendButtonEl) {
+      this.sendButtonEl.disabled = value;
+    }
+
+    if (this.sessionSwitcherButtonEl) {
+      this.sessionSwitcherButtonEl.disabled = value;
+    }
+
+    if (this.scopePickerEl) {
+      this.scopePickerEl.disabled = value;
+    }
+
+    if (this.newSessionButtonEl) {
+      this.newSessionButtonEl.disabled = value;
+    }
+
+    if (this.sessionSettingsButtonEl) {
+      this.sessionSettingsButtonEl.disabled = value;
+    }
+  }
+
   private refreshSessionControls(): void {
-    if (!this.sessionSelectEl) {
+    if (!this.sessionSwitcherButtonEl) {
       return;
     }
 
-    this.sessionSelectEl.empty();
+    const session = this.plugin.settings.chatSessions.find((item) => item.id === this.activeSessionId);
+    const label = session?.title || "当前对话";
+    this.sessionSwitcherButtonEl.title = `切换对话：${label}`;
+    this.sessionSwitcherButtonEl.setAttribute("aria-label", `切换对话：${label}`);
+  }
 
-    for (const session of this.plugin.settings.chatSessions) {
-      this.sessionSelectEl.createEl("option", {
-        value: session.id,
-        text: session.title
-      });
+  private openSessionSwitcher(): void {
+    if (this.isGenerating || this.isPreparingContext) {
+      return;
     }
 
-    this.sessionSelectEl.value = this.activeSessionId;
+    new ChatSessionSwitcherModal(
+      this.app,
+      this.plugin.settings.chatSessions,
+      this.activeSessionId,
+      (sessionId) => this.switchSession(sessionId)
+    ).open();
   }
 
   private rememberCurrentDraft(): void {
@@ -706,64 +814,103 @@ export class AIChatView extends ItemView {
   }
 
   private refreshScopeControls(): void {
-    if (!this.scopeSelectEl || !this.scopeMetaEl || !this.scopeMetaLabelEl) {
+    if (!this.scopePickerEl || !this.scopeIconEl || !this.scopeLabelEl) {
       return;
     }
 
-    const currentValue = this.plugin.settings.activeContextScopeId;
-    this.scopeSelectEl.empty();
-
-    for (const scope of this.plugin.settings.contextScopes) {
-      const files = this.plugin.contextScopeResolver.resolve(scope);
-      const label = scope.mode === "current-file"
-        ? files[0]?.name || "未打开 Markdown 笔记"
-        : scope.name;
-      this.scopeSelectEl.createEl("option", {
-        value: scope.id,
-        text: label
-      });
-    }
-
-    this.scopeSelectEl.value = currentValue;
     const selectedScope = this.plugin.getActiveContextScope();
     const files = this.plugin.contextScopeResolver.resolve(selectedScope);
-    this.scopeMetaLabelEl.setText(selectedScope ? formatAuthorizedFileNames(files) : "未选择上下文");
-    this.scopeMetaEl.disabled = files.length === 0;
-    this.scopeMetaEl.title = files.length > 0 ? files.map((file) => file.path).join("\n") : "当前没有授权文件";
+    const label = selectedScope ? formatScopeSelection(selectedScope, files) : "选择文件或文件夹";
+    setIcon(this.scopeIconEl, getScopeIcon(selectedScope));
+    this.scopeLabelEl.setText(label);
+    this.scopePickerEl.title = label;
   }
 
-  private async openAuthorizedFiles(): Promise<void> {
-    const scope = this.plugin.getActiveContextScope();
-    const files = this.plugin.contextScopeResolver.resolve(scope);
-
-    if (files.length === 0) {
+  private async openContextSourcePicker(): Promise<void> {
+    if (this.isGenerating || this.isPreparingContext) {
       return;
     }
 
-    if (files.length === 1) {
-      try {
-        await this.app.workspace.getLeaf(false).openFile(files[0]);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        new Notice(`无法打开授权文件：${message}`);
-      }
+    const session = this.plugin.getActiveChatSession();
+    const selection = await pickContextSource(this.app, this.plugin.getChatSessionContextScope(session));
+
+    if (!selection) {
       return;
     }
 
-    new AuthorizedFilesModal(this.app, scope?.name || "当前授权范围", files).open();
+    await this.plugin.setChatSessionContextSources(session.id, selection.files, selection.folders);
+    this.refreshScopeControls();
   }
 }
 
-function formatAuthorizedFileNames(files: TFile[]): string {
-  if (files.length === 0) {
-    return "未授权任何文件";
+function formatScopeSelection(scope: ContextScope, files: TFile[]): string {
+  if (scope.mode === "current-file") {
+    return files[0]?.name || "未打开 Markdown 笔记";
   }
 
-  if (files.length <= 2) {
+  if (scope.mode === "files" && files.length > 0 && files.length <= 2) {
     return files.map((file) => file.name).join("、");
   }
 
-  return `${files.slice(0, 2).map((file) => file.name).join("、")} 等 ${files.length} 个文件`;
+  if (scope.mode === "files" && files.length > 2) {
+    return `${files.slice(0, 2).map((file) => file.name).join("、")} 等 ${files.length} 个文件`;
+  }
+
+  if (scope.mode === "folders" && scope.folders.length > 0 && scope.folders.length <= 2) {
+    return scope.folders.join("、");
+  }
+
+  if (scope.mode === "folders" && scope.folders.length > 2) {
+    return `${scope.folders.slice(0, 2).join("、")} 等 ${scope.folders.length} 个文件夹`;
+  }
+
+  if (scope.mode === "mixed") {
+    return `${scope.files.length} 个文件 · ${scope.folders.length} 个文件夹`;
+  }
+
+  return `${scope.name} · ${files.length} 个文件`;
+}
+
+function getScopeIcon(scope: ContextScope | undefined): string {
+  switch (scope?.mode) {
+    case "folders":
+      return "folder";
+    case "files":
+      return "files";
+    case "tags":
+      return "tags";
+    case "rules":
+      return "list-filter";
+    case "mixed":
+      return "library";
+    default:
+      return "file-text";
+  }
+}
+
+class ChatSessionSwitcherModal extends FuzzySuggestModal<StoredChatSession> {
+  constructor(
+    app: App,
+    private readonly sessions: StoredChatSession[],
+    private readonly activeSessionId: string,
+    private readonly onSelect: (sessionId: string) => Promise<void>
+  ) {
+    super(app);
+    this.setPlaceholder("搜索并切换对话");
+  }
+
+  getItems(): StoredChatSession[] {
+    return this.sessions;
+  }
+
+  getItemText(session: StoredChatSession): string {
+    const current = session.id === this.activeSessionId ? "当前 · " : "";
+    return `${current}${session.title}`;
+  }
+
+  onChooseItem(session: StoredChatSession): void {
+    void this.onSelect(session.id);
+  }
 }
 
 function toViewMessage(message: StoredChatMessage): ViewChatMessage {

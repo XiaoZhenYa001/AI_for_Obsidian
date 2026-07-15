@@ -1,6 +1,12 @@
 import { Citation } from "../retrieval/types";
 
-export type DiagramType = "mind-map" | "flowchart" | "knowledge-map" | "timeline";
+export type DiagramType =
+  | "mind-map"
+  | "flowchart"
+  | "timeline"
+  | "knowledge-map"
+  | "architecture"
+  | "decision-tree";
 export type DiagramDirection = "LR" | "TB";
 export type DiagramSourceMode = "selection" | "current-file" | "context";
 export type DiagramNodeKind = "primary" | "secondary" | "detail" | "decision";
@@ -61,6 +67,8 @@ export type GenerateDiagramOptions = {
 export const DIAGRAM_TYPE_LABELS: Record<DiagramType, string> = {
   "mind-map": "思维导图",
   flowchart: "流程图",
-  "knowledge-map": "知识关系图",
-  timeline: "时间线"
+  timeline: "时间线",
+  "knowledge-map": "概念关系图",
+  architecture: "系统架构图",
+  "decision-tree": "决策树"
 };

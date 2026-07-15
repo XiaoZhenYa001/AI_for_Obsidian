@@ -16,9 +16,13 @@ export class SelfCheckModal extends Modal {
   }
 
   onOpen(): void {
+    this.contentEl.addClass("ai-second-brain-self-check-modal");
+    this.render();
+  }
+
+  private render(): void {
     const { contentEl } = this;
     contentEl.empty();
-    contentEl.addClass("ai-second-brain-self-check-modal");
     contentEl.createEl("h2", { text: "AI Second Brain 自检" });
     contentEl.createEl("p", {
       cls: "ai-second-brain-muted",
@@ -28,14 +32,14 @@ export class SelfCheckModal extends Modal {
     if (this.onRefresh) {
       const refreshButton = contentEl.createEl("button", {
         cls: "ai-second-brain-icon-button",
-        attr: { "aria-label": "刷新" }
+        attr: { type: "button", "aria-label": "刷新", title: "刷新" }
       });
       const refreshIcon = refreshButton.createSpan({ cls: "ai-second-brain-button-icon" });
       setIcon(refreshIcon, "refresh-cw");
       refreshButton.createSpan({ cls: "ai-second-brain-button-label", text: "刷新" });
       refreshButton.addEventListener("click", () => {
         this.items = this.onRefresh!();
-        this.onOpen();
+        this.render();
       });
     }
 
@@ -65,4 +69,3 @@ function statusLabel(status: SelfCheckItem["status"]): string {
 
   return "失败";
 }
-

@@ -1,4 +1,4 @@
-export type ContextScopeMode = "current-file" | "files" | "folders" | "tags" | "rules";
+export type ContextScopeMode = "current-file" | "files" | "folders" | "mixed" | "tags" | "rules";
 
 export type ContextScope = {
   id: string;
@@ -16,6 +16,7 @@ export const SCOPE_MODE_LABELS: Record<ContextScopeMode, string> = {
   "current-file": "当前文件",
   "files": "指定文件",
   "folders": "文件夹",
+  "mixed": "文件与文件夹",
   "tags": "标签",
   "rules": "路径规则",
 };

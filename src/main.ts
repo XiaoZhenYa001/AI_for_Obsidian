@@ -1,9 +1,9 @@
-import { MarkdownView, Notice, Plugin, TFile, WorkspaceLeaf } from "obsidian";
+import { Editor, MarkdownView, Notice, Plugin, TFile, WorkspaceLeaf } from "obsidian";
 import { GenerateContentModal } from "./actions/generate-content-modal";
 import { runSelectionAction, SelectionActionType } from "./actions/selection-actions";
 import { ChatService } from "./chat/chat-service";
 import { AI_CHAT_VIEW_TYPE, AIChatView } from "./chat/chat-view";
-import { StoredChatMessage, StoredChatSession } from "./chat/types";
+import { ChatSessionConfig, StoredChatMessage, StoredChatSession } from "./chat/types";
 import { ContextScope } from "./context/scope-types";
 import { ContextScopeResolver } from "./context/scope-resolver";
 import { ContextScopeSwitcherModal } from "./context/scope-switcher-modal";
@@ -271,10 +271,32 @@ export default class ObsidianAIPlugin extends Plugin {
     return undefined;
   }
 
+  getMarkdownViewForEditor(editor: Editor): MarkdownView | undefined {
+    const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
+
+    if (activeView?.editor === editor) {
+      this.lastMarkdownView = activeView;
+      return activeView;
+    }
+
+    for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
+      if (leaf.view instanceof MarkdownView && leaf.view.editor === editor) {
+        this.lastMarkdownView = leaf.view;
+        return leaf.view;
+      }
+    }
+
+    return undefined;
+  }
+
   // --- Delegated public API (used by other modules) ---
 
   getActiveContextScope(): ContextScope | undefined {
-    return this.contextScopeManager.getActive();
+    return this.getChatSessionContextScope(this.getActiveChatSession());
+  }
+
+  getChatSessionContextScope(session: StoredChatSession): ContextScope | undefined {
+    return session.contextScopeOverride || this.settings.contextScopes.find((scope) => scope.id === session.contextScopeId);
   }
 
   countFilesInContextScope(scope: ContextScope | undefined): number {
@@ -283,7 +305,41 @@ export default class ObsidianAIPlugin extends Plugin {
 
   async setActiveContextScope(scopeId: string): Promise<void> {
     await this.contextScopeManager.setActive(scopeId);
+    const session = this.getActiveChatSession();
+    if (session.contextScopeOverride) {
+      session.contextScopeOverride = undefined;
+      await this.saveSettings();
+    }
     await this.syncActiveChatSessionContext();
+  }
+
+  async setChatSessionContextSources(sessionId: string, files: string[], folders: string[]): Promise<void> {
+    const session = this.settings.chatSessions.find((item) => item.id === sessionId);
+
+    if (!session) {
+      return;
+    }
+
+    const normalizedFiles = normalizeVaultPaths(files).filter((path) => path.toLowerCase().endsWith(".md"));
+    const normalizedFolders = normalizeVaultPaths(folders);
+    const baseScope = this.settings.contextScopes.find((scope) => scope.id === session.contextScopeId);
+    session.contextScopeOverride = {
+      id: `session-context-${session.id}`,
+      name: `已选择 ${normalizedFiles.length + normalizedFolders.length} 项`,
+      mode: normalizedFiles.length > 0 && normalizedFolders.length > 0
+        ? "mixed"
+        : normalizedFolders.length > 0 ? "folders" : "files",
+      files: normalizedFiles,
+      folders: normalizedFolders,
+      tags: [],
+      pathRules: [],
+      excludeRules: [],
+      allowCloudModels: baseScope?.allowCloudModels ?? true
+    };
+    session.lockedFilePaths = [];
+    session.lastContextFilePaths = [];
+    session.updatedAt = new Date().toISOString();
+    await this.saveSettings();
   }
 
   async addContextScope(scope: ContextScope): Promise<void> {
@@ -292,7 +348,27 @@ export default class ObsidianAIPlugin extends Plugin {
   }
 
   async removeContextScope(scopeId: string): Promise<void> {
+    const existed = this.settings.contextScopes.some((scope) => scope.id === scopeId);
     await this.contextScopeManager.remove(scopeId);
+
+    if (existed && !this.settings.contextScopes.some((scope) => scope.id === scopeId)) {
+      const fallbackScopeId = this.settings.activeContextScopeId;
+
+      for (const session of this.settings.chatSessions) {
+        if (session.contextScopeId !== scopeId) {
+          continue;
+        }
+
+        session.contextScopeId = fallbackScopeId;
+        session.contextScopeOverride = undefined;
+        session.lockedFilePaths = [];
+        session.lastContextFilePaths = [];
+        session.updatedAt = new Date().toISOString();
+      }
+
+      await this.saveSettings();
+    }
+
     await this.syncActiveChatSessionContext();
   }
 
@@ -327,13 +403,71 @@ export default class ObsidianAIPlugin extends Plugin {
     return fallback;
   }
 
-  async createChatSession(): Promise<StoredChatSession> {
-    const session = createChatSessionRecord(this.settings.activeContextScopeId);
+  async createChatSession(config?: Partial<ChatSessionConfig>): Promise<StoredChatSession> {
+    const session = createChatSessionRecord(config?.contextScopeId || this.settings.activeContextScopeId, [], config);
     this.settings.chatSessions.unshift(session);
     this.settings.chatSessions = this.settings.chatSessions.slice(0, CHAT_SESSION_LIMIT);
     this.settings.activeChatSessionId = session.id;
+    this.settings.activeContextScopeId = session.contextScopeId;
     await this.saveSettings();
     return session;
+  }
+
+  async updateChatSession(sessionId: string, config: Partial<ChatSessionConfig>): Promise<StoredChatSession | undefined> {
+    const session = this.settings.chatSessions.find((item) => item.id === sessionId);
+
+    if (!session) {
+      return undefined;
+    }
+
+    if (config.title !== undefined) {
+      session.title = config.title.trim() || "新对话";
+    }
+
+    if (config.purpose !== undefined) {
+      session.purpose = config.purpose.trim();
+    }
+
+    if (config.autoContext !== undefined) {
+      session.autoContext = config.autoContext;
+    }
+
+    if (config.contextScopeId && this.settings.contextScopes.some((scope) => scope.id === config.contextScopeId)) {
+      const changedScope = session.contextScopeId !== config.contextScopeId;
+      session.contextScopeId = config.contextScopeId;
+      if (changedScope) {
+        session.contextScopeOverride = undefined;
+        session.lockedFilePaths = [];
+        session.lastContextFilePaths = [];
+      }
+      if (session.id === this.settings.activeChatSessionId) {
+        this.settings.activeContextScopeId = config.contextScopeId;
+      }
+    }
+
+    if (config.lockedFilePaths !== undefined) {
+      session.lockedFilePaths = normalizeMarkdownPaths(config.lockedFilePaths);
+    }
+
+    session.updatedAt = new Date().toISOString();
+    await this.saveSettings();
+    return session;
+  }
+
+  async saveChatSessionContext(
+    sessionId: string,
+    selectedFilePaths: string[],
+    lockedFilePaths: string[]
+  ): Promise<void> {
+    const session = this.settings.chatSessions.find((item) => item.id === sessionId);
+
+    if (!session) {
+      return;
+    }
+
+    session.lastContextFilePaths = normalizeMarkdownPaths(selectedFilePaths);
+    session.lockedFilePaths = normalizeMarkdownPaths(lockedFilePaths);
+    await this.saveSettings();
   }
 
   async setActiveChatSession(sessionId: string): Promise<StoredChatSession | undefined> {
@@ -556,6 +690,9 @@ export default class ObsidianAIPlugin extends Plugin {
     }
 
     session.contextScopeId = this.settings.activeContextScopeId;
+    session.contextScopeOverride = undefined;
+    session.lockedFilePaths = [];
+    session.lastContextFilePaths = [];
     session.updatedAt = new Date().toISOString();
     await this.saveSettings();
   }
@@ -591,6 +728,11 @@ function normalizeChatSessions(
         id: session.id || `chat-${crypto.randomUUID()}`,
         title: session.title || createChatSessionTitle(messages),
         contextScopeId: session.contextScopeId || contextScopeId,
+        contextScopeOverride: normalizeSessionContextScope(session.contextScopeOverride),
+        purpose: session.purpose || "",
+        autoContext: session.autoContext ?? true,
+        lockedFilePaths: normalizeMarkdownPaths(session.lockedFilePaths || []),
+        lastContextFilePaths: normalizeMarkdownPaths(session.lastContextFilePaths || []),
         messages,
         createdAt,
         updatedAt: session.updatedAt || messages[messages.length - 1]?.createdAt || createdAt
@@ -600,15 +742,51 @@ function normalizeChatSessions(
     .slice(0, CHAT_SESSION_LIMIT);
 }
 
-function createChatSessionRecord(contextScopeId: string, messages: StoredChatMessage[] = []): StoredChatSession {
+function createChatSessionRecord(
+  contextScopeId: string,
+  messages: StoredChatMessage[] = [],
+  config: Partial<ChatSessionConfig> = {}
+): StoredChatSession {
   const now = new Date().toISOString();
   return {
     id: `chat-${crypto.randomUUID()}`,
-    title: createChatSessionTitle(messages),
+    title: config.title?.trim() || createChatSessionTitle(messages),
     contextScopeId,
+    contextScopeOverride: undefined,
+    purpose: config.purpose?.trim() || "",
+    autoContext: config.autoContext ?? true,
+    lockedFilePaths: normalizeMarkdownPaths(config.lockedFilePaths || []),
+    lastContextFilePaths: [],
     messages: messages.slice(-CHAT_MESSAGE_LIMIT),
     createdAt: messages[0]?.createdAt || now,
     updatedAt: messages[messages.length - 1]?.createdAt || now
+  };
+}
+
+function normalizeMarkdownPaths(paths: string[]): string[] {
+  return Array.from(new Set(paths.map((path) => path.trim()).filter((path) => path.toLowerCase().endsWith(".md"))))
+    .slice(0, 8);
+}
+
+function normalizeVaultPaths(paths: string[]): string[] {
+  return Array.from(new Set(paths.map((path) => path.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "").trim()).filter(Boolean)));
+}
+
+function normalizeSessionContextScope(scope: ContextScope | undefined): ContextScope | undefined {
+  if (!scope || (scope.mode !== "files" && scope.mode !== "folders" && scope.mode !== "mixed")) {
+    return undefined;
+  }
+
+  return {
+    id: scope.id || `session-context-${crypto.randomUUID()}`,
+    name: scope.name || "对话上下文",
+    mode: scope.mode,
+    files: scope.files || [],
+    folders: scope.folders || [],
+    tags: [],
+    pathRules: [],
+    excludeRules: scope.excludeRules || [],
+    allowCloudModels: scope.allowCloudModels ?? true
   };
 }
 
