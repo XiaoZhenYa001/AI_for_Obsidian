@@ -2,6 +2,7 @@ import { TFile } from "obsidian";
 import type ObsidianAIPlugin from "../main";
 import { Citation } from "../retrieval/types";
 import { createExcerpt } from "../utils/text";
+import { isContextFile } from "../utils/context-files";
 import { parseDiagramSpec } from "./diagram-spec";
 import { ExcalidrawAdapter } from "./excalidraw-adapter";
 import { layoutDiagram } from "./layout";
@@ -123,7 +124,7 @@ export class DiagramService {
 
       const providedCitations = (options.sourceCitations || []).filter((citation) => {
         const file = this.plugin.app.vault.getAbstractFileByPath(citation.filePath);
-        return file instanceof TFile && file.extension === "md";
+        return isContextFile(file);
       });
       const path = options.sourceFilePath || "";
       const citations = providedCitations.length > 0

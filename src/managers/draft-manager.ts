@@ -57,7 +57,7 @@ export class DraftManager {
 
   async createHealthReport(): Promise<KnowledgeHealthReport | undefined> {
     const scope = this.plugin.getActiveContextScope();
-    const files = this.plugin.contextScopeResolver.resolve(scope);
+    const files = this.plugin.contextScopeResolver.resolve(scope).filter((file) => file.extension === "md");
 
     if (files.length === 0) {
       new Notice("当前上下文范围内没有可分析的 Markdown 文件。");

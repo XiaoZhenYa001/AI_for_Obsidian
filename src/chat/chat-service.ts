@@ -1,4 +1,5 @@
 import type ObsidianAIPlugin from "../main";
+import { TFile } from "obsidian";
 import { AIProvider, ChatMessage, ChatRequest } from "../providers/types";
 import { ContextScope } from "../context/scope-types";
 import { buildCitations } from "../retrieval/citations";
@@ -184,6 +185,16 @@ export class ChatService {
 
     const retrievedChunks = await this.plugin.textSearchService.search(query, files, 8);
     const retrievedIds = new Set(retrievedChunks.map((chunk) => chunk.id));
+    const embeddedFiles = this.resolveEmbeddedFiles(retrievedChunks, authorizedByPath);
+    const embeddedChunks = await this.plugin.textSearchService.getRepresentativeChunks(embeddedFiles);
+
+    for (const chunk of embeddedChunks) {
+      if (!retrievedIds.has(chunk.id)) {
+        retrievedChunks.push(chunk);
+        retrievedIds.add(chunk.id);
+      }
+    }
+
     const representedLockedPaths = new Set(retrievedChunks.map((chunk) => chunk.filePath));
     const missingLockedFiles = lockedFiles.filter((file) => !representedLockedPaths.has(file.path));
     const lockedChunks = await this.plugin.textSearchService.getRepresentativeChunks(missingLockedFiles);
@@ -206,6 +217,28 @@ export class ChatService {
       summary: formatRetrievedChunks(retrievedChunks),
       citations: buildCitations(retrievedChunks)
     };
+  }
+
+  private resolveEmbeddedFiles(
+    chunks: RetrievedChunk[],
+    authorizedByPath: Map<string, TFile>
+  ): TFile[] {
+    const files = new Map<string, TFile>();
+
+    for (const chunk of chunks) {
+      for (const match of chunk.content.matchAll(/!\[\[([^\]|#]+)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]/g)) {
+        const target = this.plugin.app.metadataCache.getFirstLinkpathDest(match[1].trim(), chunk.filePath);
+        const authorized = target ? authorizedByPath.get(target.path) : undefined;
+        if (authorized) {
+          files.set(authorized.path, authorized);
+        }
+        if (files.size >= 3) {
+          return Array.from(files.values());
+        }
+      }
+    }
+
+    return Array.from(files.values());
   }
 
   private resolveContextScope(options: ChatOptions): ContextScope | undefined {
@@ -256,10 +289,19 @@ async function* singleChunkStream(content: string): AsyncIterable<string> {
 }
 
 function formatRetrievedChunks(chunks: RetrievedChunk[]): string {
+  const summarizedFiles = new Set<string>();
+
   return chunks
     .map((chunk, index) => {
-      const heading = chunk.heading ? `\n标题：${chunk.heading}` : "";
-      return `[${index + 1}] 文件：${chunk.filePath}${heading}\n行号：${chunk.startLine}-${chunk.endLine}\n内容：\n${chunk.content}`;
+      const heading = chunk.headingPath && chunk.headingPath.length > 0
+        ? `\n标题路径：${chunk.headingPath.join(" > ")}`
+        : chunk.heading ? `\n标题：${chunk.heading}` : "";
+      const includeSemantics = Boolean(chunk.semanticContext) && !summarizedFiles.has(chunk.filePath);
+      if (includeSemantics) {
+        summarizedFiles.add(chunk.filePath);
+      }
+      const semantics = includeSemantics ? `\n结构信息：\n${chunk.semanticContext}` : "";
+      return `[${index + 1}] 文件：${chunk.filePath}${heading}${semantics}\n行号：${chunk.startLine}-${chunk.endLine}\n内容：\n${chunk.content}`;
     })
     .join("\n\n---\n\n");
 }

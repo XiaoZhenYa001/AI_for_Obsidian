@@ -1,5 +1,6 @@
 import { App, TFile } from "obsidian";
 import { readFrontmatterTags } from "../utils/frontmatter";
+import { isContextFile } from "../utils/context-files";
 import { ContextScope } from "./scope-types";
 
 export class ContextScopeResolver {
@@ -14,13 +15,14 @@ export class ContextScopeResolver {
     }
 
     if (scope.mode === "current-file") {
-      const activeFile = this.getCurrentFile?.() || this.app.workspace.getActiveFile() || undefined;
-      return activeFile?.extension === "md" ? [activeFile] : [];
+      const workspaceFile = this.app.workspace.getActiveFile();
+      const activeFile = isContextFile(workspaceFile) ? workspaceFile : this.getCurrentFile?.();
+      return isContextFile(activeFile) ? [activeFile] : [];
     }
 
-    const markdownFiles = this.app.vault.getMarkdownFiles();
+    const contextFiles = this.app.vault.getAllLoadedFiles().filter(isContextFile);
 
-    return markdownFiles.filter((file) => {
+    return contextFiles.filter((file) => {
       if (scope.excludeRules.some((rule) => file.path.includes(rule))) {
         return false;
       }
@@ -39,6 +41,10 @@ export class ContextScopeResolver {
       }
 
       if (scope.mode === "tags") {
+        if (file.extension !== "md") {
+          return false;
+        }
+
         const cache = this.app.metadataCache.getFileCache(file);
         const tags = [
           ...(cache?.tags?.map((tag) => tag.tag.replace(/^#/, "")) || []),

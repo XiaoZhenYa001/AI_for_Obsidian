@@ -2,10 +2,16 @@ import { NoteChunk } from "./types";
 
 const DEFAULT_MAX_CHARS = 1800;
 
-export function chunkMarkdown(filePath: string, content: string, maxChars = DEFAULT_MAX_CHARS): NoteChunk[] {
+export function chunkMarkdown(
+  filePath: string,
+  content: string,
+  maxChars = DEFAULT_MAX_CHARS,
+  semanticContext = ""
+): NoteChunk[] {
   const lines = content.split(/\r?\n/);
   const chunks: NoteChunk[] = [];
   let heading: string | undefined;
+  let headingPath: string[] = [];
   let buffer: string[] = [];
   let bufferLength = 0;
   let startLine = 1;
@@ -24,6 +30,8 @@ export function chunkMarkdown(filePath: string, content: string, maxChars = DEFA
       id: `${filePath}:${startLine}-${endLine}`,
       filePath,
       heading,
+      headingPath: [...headingPath],
+      semanticContext: semanticContext || undefined,
       content: text,
       startLine,
       endLine
@@ -45,6 +53,8 @@ export function chunkMarkdown(filePath: string, content: string, maxChars = DEFA
 
     if (headingMatch) {
       heading = headingMatch[2].trim();
+      const level = headingMatch[1].length;
+      headingPath = [...headingPath.slice(0, level - 1), heading];
       startLine = lineNumber;
     }
 

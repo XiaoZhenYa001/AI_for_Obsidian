@@ -23,6 +23,7 @@ class ChatSessionModal extends Modal {
   private title: string;
   private purpose: string;
   private contextScopeId: string;
+  private contextMode: ChatSessionConfig["contextMode"];
   private autoContext: boolean;
   private lockedFilePaths: string[];
   private settled = false;
@@ -36,6 +37,7 @@ class ChatSessionModal extends Modal {
     this.title = options.session?.title === "新对话" ? "" : options.session?.title || "";
     this.purpose = options.session?.purpose || "";
     this.contextScopeId = options.session?.contextScopeId || options.defaultScopeId;
+    this.contextMode = options.session?.contextMode || (this.contextScopeId === "current-file" ? "follow" : "manual");
     this.autoContext = options.session?.autoContext ?? true;
     this.lockedFilePaths = [...(options.session?.lockedFilePaths || [])];
   }
@@ -79,6 +81,20 @@ class ChatSessionModal extends Modal {
           .setValue(this.purpose)
           .onChange((value) => {
             this.purpose = value.trim();
+          });
+      });
+
+    new Setting(form)
+      .setName("文件识别方式")
+      .setDesc("跟随活动文件、锁定当前文件，或使用手动授权范围")
+      .addDropdown((dropdown) => {
+        dropdown
+          .addOption("follow", "跟随当前文件")
+          .addOption("locked", "锁定当前文件")
+          .addOption("manual", "手动上下文")
+          .setValue(this.contextMode)
+          .onChange((value) => {
+            this.contextMode = value as ChatSessionConfig["contextMode"];
           });
       });
 
@@ -132,6 +148,7 @@ class ChatSessionModal extends Modal {
         title: this.title || "新对话",
         purpose: this.purpose,
         contextScopeId: this.contextScopeId,
+        contextMode: this.contextMode,
         autoContext: this.autoContext,
         lockedFilePaths: this.lockedFilePaths
       });

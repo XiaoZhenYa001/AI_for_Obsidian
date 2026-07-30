@@ -1,5 +1,6 @@
 import { App, TFile } from "obsidian";
 import { chunkMarkdown } from "./chunker";
+import { prepareContextDocument } from "./markdown-semantics";
 import { NoteChunk, RetrievedChunk } from "./types";
 
 const SCORE_DIRECT_PHRASE = 12;
@@ -86,7 +87,14 @@ export class TextSearchService {
       }
 
       for (const chunk of chunks) {
-        const score = scoreChunk(chunk.filePath, chunk.heading || "", chunk.content, terms, directPhrase);
+        const score = scoreChunk(
+          chunk.filePath,
+          chunk.heading || "",
+          chunk.content,
+          chunk.semanticContext || "",
+          terms,
+          directPhrase
+        );
 
         if (score > 0) {
           results.push({
@@ -155,16 +163,29 @@ export class TextSearchService {
   }
 
   private async indexFile(file: TFile): Promise<IndexedFile> {
-    const content = await this.app.vault.cachedRead(file);
+    const rawContent = await this.app.vault.cachedRead(file);
+    const prepared = prepareContextDocument(file.path, rawContent, this.getIncomingLinks(file.path));
     const indexedFile: IndexedFile = {
       path: file.path,
       mtime: file.stat.mtime,
       size: file.stat.size,
-      chunks: chunkMarkdown(file.path, content)
+      chunks: chunkMarkdown(file.path, prepared.content, undefined, prepared.semanticContext)
     };
 
     this.index.set(file.path, indexedFile);
     return indexedFile;
+  }
+
+  private getIncomingLinks(filePath: string): string[] {
+    const incoming: string[] = [];
+
+    for (const [sourcePath, targets] of Object.entries(this.app.metadataCache.resolvedLinks)) {
+      if (targets[filePath] !== undefined) {
+        incoming.push(sourcePath);
+      }
+    }
+
+    return incoming.slice(0, 20);
   }
 }
 
@@ -172,12 +193,14 @@ function scoreChunk(
   filePath: string,
   heading: string,
   content: string,
+  semanticContext: string,
   terms: string[],
   directPhrase: string
 ): number {
   const normalizedPath = normalize(filePath);
   const normalizedHeading = normalize(heading);
   const normalizedContent = normalize(content);
+  const normalizedSemantics = normalize(semanticContext);
   let score = 0;
 
   if (directPhrase.length >= 4 && normalizedContent.includes(directPhrase)) {
@@ -194,6 +217,7 @@ function scoreChunk(
     }
 
     score += Math.min(countOccurrences(normalizedContent, term), SCORE_CONTENT_MAX);
+    score += Math.min(countOccurrences(normalizedSemantics, term), 3);
   }
 
   return score;

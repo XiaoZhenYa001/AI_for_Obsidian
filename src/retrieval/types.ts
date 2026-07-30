@@ -2,6 +2,8 @@ export type NoteChunk = {
   id: string;
   filePath: string;
   heading?: string;
+  headingPath?: string[];
+  semanticContext?: string;
   content: string;
   startLine: number;
   endLine: number;
@@ -18,4 +20,3 @@ export type Citation = {
   startLine: number;
   endLine: number;
 };
-

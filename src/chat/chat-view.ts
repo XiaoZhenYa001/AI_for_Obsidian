@@ -1,11 +1,11 @@
-import { App, Component, FuzzySuggestModal, ItemView, MarkdownRenderer, Notice, setIcon, TFile, WorkspaceLeaf } from "obsidian";
+import { App, Component, FuzzySuggestModal, ItemView, MarkdownRenderer, MarkdownView, Menu, Notice, setIcon, TFile, WorkspaceLeaf } from "obsidian";
 import type ObsidianAIPlugin from "../main";
 import { isAbortError } from "../providers/errors";
 import { ChatMessage } from "../providers/types";
 import { Citation } from "../retrieval/types";
 import { DiffPreviewModal } from "../ui/diff-preview-modal";
 import { createIconButton } from "../ui/icon-button";
-import { StoredChatMessage, StoredChatSession, ViewChatMessage } from "./types";
+import { ChatContextMode, SelectionReference, StoredChatMessage, StoredChatSession, ViewChatMessage } from "./types";
 import { EditorChangeTransaction } from "../actions/editor-change-transaction";
 import { GenerateDiagramModal } from "../diagrams/generate-diagram-modal";
 import { confirmContextSelection } from "../context/context-selection-modal";
@@ -23,6 +23,7 @@ export class AIChatView extends ItemView {
   private scopeIconEl?: HTMLElement;
   private scopeLabelEl?: HTMLElement;
   private sendButtonEl?: HTMLButtonElement;
+  private selectionReferencesEl?: HTMLElement;
   private stopButtonEl?: HTMLButtonElement;
   private newSessionButtonEl?: HTMLButtonElement;
   private sessionSettingsButtonEl?: HTMLButtonElement;
@@ -105,8 +106,8 @@ export class AIChatView extends ItemView {
     this.scopeLabelEl = this.scopePickerEl.createSpan({ cls: "ai-second-brain-scope-picker-label" });
     const scopeChevron = this.scopePickerEl.createSpan({ cls: "ai-second-brain-scope-picker-chevron" });
     setIcon(scopeChevron, "chevron-down");
-    this.scopePickerEl.addEventListener("click", () => {
-      void this.openContextSourcePicker();
+    this.scopePickerEl.addEventListener("click", (event) => {
+      this.openContextModeMenu(event);
     });
     this.refreshScopeControls();
 
@@ -140,20 +141,22 @@ export class AIChatView extends ItemView {
     this.renderMessages();
 
     const composer = container.createDiv({ cls: "ai-second-brain-composer" });
-    this.inputEl = composer.createEl("textarea", {
+    this.selectionReferencesEl = composer.createDiv({ cls: "ai-second-brain-composer-references" });
+    const composerMain = composer.createDiv({ cls: "ai-second-brain-composer-main" });
+    this.inputEl = composerMain.createEl("textarea", {
       cls: "ai-second-brain-input",
       attr: {
         placeholder: "向你的笔记提问，或让 AI 帮你整理思路..."
       }
     });
 
-    this.sendButtonEl = createIconButton(composer, "send-horizontal", "发送", "ai-second-brain-send mod-cta");
+    this.sendButtonEl = createIconButton(composerMain, "send-horizontal", "发送", "ai-second-brain-send mod-cta");
 
     this.sendButtonEl.addEventListener("click", () => {
       void this.submit();
     });
 
-    this.stopButtonEl = createIconButton(composer, "square", "停止", "ai-second-brain-stop");
+    this.stopButtonEl = createIconButton(composerMain, "square", "停止", "ai-second-brain-stop");
     this.stopButtonEl.style.display = "none";
     this.stopButtonEl.addEventListener("click", () => {
       this.abortController?.abort();
@@ -165,6 +168,7 @@ export class AIChatView extends ItemView {
         void this.submit();
       }
     });
+    this.renderPendingSelectionReferences();
   }
 
   async onClose(): Promise<void> {
@@ -173,6 +177,7 @@ export class AIChatView extends ItemView {
     this.clearMessageRenderComponents();
     this.messagesEl = undefined;
     this.inputEl = undefined;
+    this.selectionReferencesEl = undefined;
     this.sessionSwitcherButtonEl = undefined;
     this.scopePickerEl = undefined;
     this.scopeIconEl = undefined;
@@ -182,6 +187,11 @@ export class AIChatView extends ItemView {
     this.newSessionButtonEl = undefined;
     this.sessionSettingsButtonEl = undefined;
     this.clearButtonEl = undefined;
+  }
+
+  refreshExternalState(): void {
+    this.refreshScopeControls();
+    this.renderPendingSelectionReferences();
   }
 
   private async submit(): Promise<void> {
@@ -196,6 +206,8 @@ export class AIChatView extends ItemView {
     }
 
     const session = this.plugin.getActiveChatSession();
+    const selectionReferences = this.plugin.getPendingSelectionReferences(session.id);
+    const requestContent = appendSelectionReferences(content, selectionReferences);
     let contextFilePaths: string[] | undefined;
 
     if (session.autoContext) {
@@ -229,7 +241,15 @@ export class AIChatView extends ItemView {
 
     const history = toProviderHistory(this.messages);
     this.inputEl!.value = "";
-    this.messages.push({ role: "user", content, isComplete: true, status: "complete", createdAt: new Date().toISOString() });
+    this.messages.push({
+      role: "user",
+      content,
+      selectionReferences,
+      isComplete: true,
+      status: "complete",
+      createdAt: new Date().toISOString()
+    });
+    this.plugin.clearPendingSelectionReferences(session.id);
     const assistantMessage: ViewChatMessage = {
       role: "assistant",
       content: "",
@@ -244,8 +264,9 @@ export class AIChatView extends ItemView {
     this.setGenerating(true);
 
     try {
-      const response = await this.plugin.chatService.streamMessage(content, {
+      const response = await this.plugin.chatService.streamMessage(requestContent, {
         signal: this.abortController.signal,
+        retrievalQuery: content,
         history,
         contextScopeId: session.contextScopeId,
         contextScope: this.plugin.getChatSessionContextScope(session),
@@ -321,6 +342,9 @@ export class AIChatView extends ItemView {
         cls: "ai-second-brain-message-role",
         text: message.role === "user" ? "你" : "AI"
       });
+      if (message.selectionReferences && message.selectionReferences.length > 0) {
+        this.renderMessageSelectionReferences(item, message.selectionReferences);
+      }
       const contentEl = item.createDiv({ cls: "ai-second-brain-message-content" });
 
       this.renderMessageContent(contentEl, message);
@@ -398,6 +422,28 @@ export class AIChatView extends ItemView {
 
     for (let index = 0; index < 3; index += 1) {
       dots.createSpan();
+    }
+  }
+
+  private renderMessageSelectionReferences(container: HTMLElement, references: SelectionReference[]): void {
+    const list = container.createDiv({ cls: "ai-second-brain-message-references" });
+    for (const reference of references) {
+      const button = list.createEl("button", {
+        cls: "ai-second-brain-message-reference",
+        attr: {
+          type: "button",
+          title: reference.text
+        }
+      });
+      const icon = button.createSpan({ cls: "ai-second-brain-message-reference-icon" });
+      setIcon(icon, "text-quote");
+      button.createSpan({
+        cls: "ai-second-brain-message-reference-label",
+        text: `${reference.fileName} · ${formatLineRange(reference)}`
+      });
+      button.addEventListener("click", () => {
+        void this.openSelectionReference(reference);
+      });
     }
   }
 
@@ -525,6 +571,26 @@ export class AIChatView extends ItemView {
     await this.plugin.app.workspace.getLeaf(false).openFile(file);
   }
 
+  private async openSelectionReference(reference: SelectionReference): Promise<void> {
+    const file = this.app.vault.getAbstractFileByPath(reference.filePath);
+
+    if (!(file instanceof TFile)) {
+      new Notice("找不到这个选区对应的笔记。");
+      return;
+    }
+
+    const leaf = this.app.workspace.getLeaf(false);
+    await leaf.openFile(file);
+    const view = leaf.view;
+    if (view instanceof MarkdownView) {
+      const editor = view.editor;
+      const from = { line: reference.fromLine, ch: reference.fromCh };
+      const to = { line: reference.toLine, ch: reference.toCh };
+      editor.setSelection(from, to);
+      editor.scrollIntoView({ from, to }, true);
+    }
+  }
+
   private previewInsertAtCursor(content: string): void {
     const view = this.plugin.getEditableMarkdownView();
     const editor = view?.editor;
@@ -629,6 +695,7 @@ export class AIChatView extends ItemView {
     this.refreshScopeControls();
     this.renderMessages();
     this.restoreSessionDraft();
+    this.renderPendingSelectionReferences();
     this.inputEl?.focus();
   }
 
@@ -681,6 +748,7 @@ export class AIChatView extends ItemView {
     this.refreshScopeControls();
     this.renderMessages();
     this.restoreSessionDraft();
+    this.renderPendingSelectionReferences();
   }
 
   private async clearMessages(): Promise<void> {
@@ -701,6 +769,7 @@ export class AIChatView extends ItemView {
           role: message.role,
           content: message.content,
           citations: message.citations,
+          selectionReferences: message.selectionReferences,
           createdAt: message.createdAt || new Date().toISOString()
         }))
     );
@@ -813,6 +882,52 @@ export class AIChatView extends ItemView {
     this.messageRenderComponents = [];
   }
 
+  private renderPendingSelectionReferences(): void {
+    if (!this.selectionReferencesEl) {
+      return;
+    }
+
+    const references = this.plugin.getPendingSelectionReferences(this.activeSessionId);
+    this.selectionReferencesEl.empty();
+    this.selectionReferencesEl.toggleClass("is-visible", references.length > 0);
+
+    if (references.length === 0) {
+      return;
+    }
+
+    const header = this.selectionReferencesEl.createDiv({ cls: "ai-second-brain-composer-references-header" });
+    header.createSpan({ text: `对话引用 · ${references.length}` });
+    const clearButton = createIconButton(header, "x", "清空全部引用", "ai-second-brain-composer-references-clear");
+    clearButton.addEventListener("click", () => {
+      this.plugin.clearPendingSelectionReferences(this.activeSessionId);
+    });
+
+    const list = this.selectionReferencesEl.createDiv({ cls: "ai-second-brain-composer-reference-list" });
+    for (const reference of references) {
+      const chip = list.createDiv({ cls: "ai-second-brain-composer-reference" });
+      const openButton = chip.createEl("button", {
+        cls: "ai-second-brain-composer-reference-open",
+        attr: {
+          type: "button",
+          title: reference.text
+        }
+      });
+      const icon = openButton.createSpan({ cls: "ai-second-brain-composer-reference-icon" });
+      setIcon(icon, "text-quote");
+      openButton.createSpan({
+        cls: "ai-second-brain-composer-reference-label",
+        text: `${reference.fileName} · ${formatLineRange(reference)}`
+      });
+      openButton.addEventListener("click", () => {
+        void this.openSelectionReference(reference);
+      });
+      const removeButton = createIconButton(chip, "x", "移除此引用", "ai-second-brain-composer-reference-remove");
+      removeButton.addEventListener("click", () => {
+        this.plugin.removePendingSelectionReference(this.activeSessionId, reference.id);
+      });
+    }
+  }
+
   private refreshScopeControls(): void {
     if (!this.scopePickerEl || !this.scopeIconEl || !this.scopeLabelEl) {
       return;
@@ -821,9 +936,53 @@ export class AIChatView extends ItemView {
     const selectedScope = this.plugin.getActiveContextScope();
     const files = this.plugin.contextScopeResolver.resolve(selectedScope);
     const label = selectedScope ? formatScopeSelection(selectedScope, files) : "选择文件或文件夹";
-    setIcon(this.scopeIconEl, getScopeIcon(selectedScope));
+    const session = this.plugin.getActiveChatSession();
+    setIcon(this.scopeIconEl, getContextModeIcon(session.contextMode, selectedScope));
     this.scopeLabelEl.setText(label);
-    this.scopePickerEl.title = label;
+    this.scopePickerEl.title = `${contextModeLabel(session.contextMode)} · ${label}`;
+  }
+
+  private openContextModeMenu(event: MouseEvent): void {
+    if (this.isGenerating || this.isPreparingContext) {
+      return;
+    }
+
+    const session = this.plugin.getActiveChatSession();
+    const menu = new Menu();
+    this.addContextModeMenuItem(menu, "follow", "scan-line", "跟随当前文件", session.contextMode);
+    this.addContextModeMenuItem(menu, "locked", "lock-keyhole", "锁定此文件", session.contextMode);
+    menu.addSeparator();
+    menu.addItem((item) => {
+      item
+        .setTitle("手动选择文件或文件夹")
+        .setIcon("folder-search")
+        .setChecked(session.contextMode === "manual")
+        .onClick(() => {
+          void this.openContextSourcePicker();
+        });
+    });
+    menu.showAtMouseEvent(event);
+  }
+
+  private addContextModeMenuItem(
+    menu: Menu,
+    mode: ChatContextMode,
+    icon: string,
+    label: string,
+    currentMode: ChatContextMode
+  ): void {
+    menu.addItem((item) => {
+      item
+        .setTitle(label)
+        .setIcon(icon)
+        .setChecked(mode === currentMode)
+        .onClick(() => {
+          if (mode === "follow" && !this.plugin.settings.autoRecognizeActiveFile) {
+            this.plugin.settings.autoRecognizeActiveFile = true;
+          }
+          void this.plugin.setChatSessionContextMode(this.activeSessionId, mode);
+        });
+    });
   }
 
   private async openContextSourcePicker(): Promise<void> {
@@ -918,6 +1077,7 @@ function toViewMessage(message: StoredChatMessage): ViewChatMessage {
     role: message.role,
     content: message.content,
     citations: message.citations,
+    selectionReferences: message.selectionReferences,
     isComplete: true,
     status: "complete",
     createdAt: message.createdAt
@@ -929,6 +1089,46 @@ function toProviderHistory(messages: ViewChatMessage[]): ChatMessage[] {
     .filter((message) => message.content.trim())
     .map((message) => ({
       role: message.role,
-      content: message.content
+      content: appendSelectionReferences(message.content, message.selectionReferences || [])
     }));
+}
+
+function appendSelectionReferences(content: string, references: SelectionReference[]): string {
+  if (references.length === 0) {
+    return content;
+  }
+
+  const blocks = references.map((reference, index) => [
+    `引用选区 ${index + 1}：${reference.filePath} · ${formatLineRange(reference)}`,
+    "```markdown",
+    reference.text,
+    "```"
+  ].join("\n"));
+  return `${content}\n\n以下是用户明确添加到本轮对话的原文选区：\n\n${blocks.join("\n\n")}`;
+}
+
+function formatLineRange(reference: SelectionReference): string {
+  const start = reference.fromLine + 1;
+  const end = reference.toLine + 1;
+  return start === end ? `第 ${start} 行` : `第 ${start}–${end} 行`;
+}
+
+function contextModeLabel(mode: ChatContextMode): string {
+  if (mode === "follow") {
+    return "跟随当前文件";
+  }
+  if (mode === "locked") {
+    return "已锁定";
+  }
+  return "手动上下文";
+}
+
+function getContextModeIcon(mode: ChatContextMode, scope: ContextScope | undefined): string {
+  if (mode === "follow") {
+    return "scan-line";
+  }
+  if (mode === "locked") {
+    return "lock-keyhole";
+  }
+  return getScopeIcon(scope);
 }

@@ -8,6 +8,7 @@ export type ObsidianAISettings = {
   defaultChatProviderId: string;
   defaultEditProviderId: string;
   activeContextScopeId: string;
+  autoRecognizeActiveFile: boolean;
   contextScopes: ContextScope[];
   promptTemplates: PromptTemplate[];
   chatSessions: StoredChatSession[];

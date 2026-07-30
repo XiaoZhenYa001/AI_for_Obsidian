@@ -1,4 +1,4 @@
-import { missingApiKey, missingModel } from "./errors";
+import { missingModel } from "./errors";
 import { BaseProvider } from "./base-provider";
 import { AIProviderConfig, ChatRequest, ChatStreamEvent } from "./types";
 
@@ -26,10 +26,6 @@ export class OpenAICompatibleProvider extends BaseProvider {
   }
 
   protected assertReady(model: string | undefined): void {
-    if (!this.config.apiKey) {
-      throw missingApiKey(this.config.name);
-    }
-
     if (!model) {
       throw missingModel(this.config.name);
     }
@@ -70,10 +66,15 @@ export class OpenAICompatibleProvider extends BaseProvider {
   }
 
   protected getHeaders(): Record<string, string> {
-    return {
+    const headers: Record<string, string> = {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${this.config.apiKey}`,
     };
+
+    if (this.config.apiKey) {
+      headers.Authorization = `Bearer ${this.config.apiKey}`;
+    }
+
+    return headers;
   }
 }
 

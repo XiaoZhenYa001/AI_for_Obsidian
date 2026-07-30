@@ -1,9 +1,15 @@
-import { Editor, MarkdownView, Notice, Plugin, TFile, WorkspaceLeaf } from "obsidian";
+import { Editor, MarkdownView, Notice, Plugin, setIcon, TFile, WorkspaceLeaf } from "obsidian";
 import { GenerateContentModal } from "./actions/generate-content-modal";
 import { runSelectionAction, SelectionActionType } from "./actions/selection-actions";
 import { ChatService } from "./chat/chat-service";
 import { AI_CHAT_VIEW_TYPE, AIChatView } from "./chat/chat-view";
-import { ChatSessionConfig, StoredChatMessage, StoredChatSession } from "./chat/types";
+import {
+  ChatContextMode,
+  ChatSessionConfig,
+  SelectionReference,
+  StoredChatMessage,
+  StoredChatSession
+} from "./chat/types";
 import { ContextScope } from "./context/scope-types";
 import { ContextScopeResolver } from "./context/scope-resolver";
 import { ContextScopeSwitcherModal } from "./context/scope-switcher-modal";
@@ -24,7 +30,8 @@ import { ObsidianAISettingTab } from "./settings/settings-tab";
 import { BUILT_IN_PROMPT_TEMPLATES } from "./templates/built-in-templates";
 import { TemplateService } from "./templates/template-service";
 import { PromptTemplate } from "./templates/types";
-import { EditorSubmenuController } from "./ui/editor-submenu-controller";
+import { isContextFile, isContextFilePath } from "./utils/context-files";
+import { createSelectionToolbarExtension } from "./ui/selection-toolbar";
 
 const CHAT_MESSAGE_LIMIT = 40;
 const CHAT_SESSION_LIMIT = 30;
@@ -51,7 +58,8 @@ export default class ObsidianAIPlugin extends Plugin {
   draftManager!: DraftManager;
   diagramService!: DiagramService;
   private lastMarkdownView?: MarkdownView;
-  private editorSubmenuController!: EditorSubmenuController;
+  private statusBarEl?: HTMLElement;
+  private readonly pendingSelectionReferences = new Map<string, SelectionReference[]>();
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -66,16 +74,19 @@ export default class ObsidianAIPlugin extends Plugin {
     this.providerManager = new ProviderManager(this);
     this.draftManager = new DraftManager(this);
     this.diagramService = new DiagramService(this);
-    this.editorSubmenuController = new EditorSubmenuController(this);
+    this.registerEditorExtension(createSelectionToolbarExtension(this));
 
     this.registerView(AI_CHAT_VIEW_TYPE, (leaf) => new AIChatView(leaf, this));
     this.captureActiveMarkdownView();
+    this.createStatusBarEntry();
 
     this.registerEvent(
       this.app.workspace.on("active-leaf-change", (leaf) => {
         if (leaf?.view instanceof MarkdownView) {
           this.lastMarkdownView = leaf.view;
         }
+        this.refreshStatusBar();
+        this.refreshChatViews();
       })
     );
 
@@ -183,26 +194,27 @@ export default class ObsidianAIPlugin extends Plugin {
     }
 
     this.registerEvent(
-      this.app.workspace.on("editor-menu", (menu, editor) => {
-        menu.addSeparator();
-        menu.addItem((item) =>
-          item.setTitle(this.editorSubmenuController.createMenuTitle(editor)).setIcon("sparkles")
-        );
+      this.app.vault.on("create", (file) => {
+        if (isContextFile(file)) {
+          this.refreshStatusBar();
+        }
       })
     );
 
     this.registerEvent(
       this.app.vault.on("modify", (file) => {
-        if (file instanceof TFile && file.extension === "md") {
+        if (isContextFile(file)) {
           this.textSearchService.invalidateFile(file.path);
+          this.refreshStatusBar();
         }
       })
     );
 
     this.registerEvent(
       this.app.vault.on("delete", (file) => {
-        if (file instanceof TFile && file.extension === "md") {
+        if (isContextFile(file)) {
           this.textSearchService.invalidateFile(file.path);
+          this.refreshStatusBar();
         }
       })
     );
@@ -211,9 +223,10 @@ export default class ObsidianAIPlugin extends Plugin {
       this.app.vault.on("rename", (file, oldPath) => {
         this.textSearchService.invalidateFile(oldPath);
 
-        if (file instanceof TFile && file.extension === "md") {
+        if (isContextFile(file)) {
           this.textSearchService.invalidateFile(file.path);
         }
+        this.refreshStatusBar();
       })
     );
 
@@ -221,7 +234,6 @@ export default class ObsidianAIPlugin extends Plugin {
   }
 
   onunload(): void {
-    this.editorSubmenuController.hide();
     this.app.workspace.detachLeavesOfType(AI_CHAT_VIEW_TYPE);
   }
 
@@ -289,6 +301,17 @@ export default class ObsidianAIPlugin extends Plugin {
     return undefined;
   }
 
+  getMarkdownViewForElement(element: HTMLElement): MarkdownView | undefined {
+    for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
+      if (leaf.view instanceof MarkdownView && leaf.view.containerEl.contains(element)) {
+        this.lastMarkdownView = leaf.view;
+        return leaf.view;
+      }
+    }
+
+    return undefined;
+  }
+
   // --- Delegated public API (used by other modules) ---
 
   getActiveContextScope(): ContextScope | undefined {
@@ -296,7 +319,24 @@ export default class ObsidianAIPlugin extends Plugin {
   }
 
   getChatSessionContextScope(session: StoredChatSession): ContextScope | undefined {
-    return session.contextScopeOverride || this.settings.contextScopes.find((scope) => scope.id === session.contextScopeId);
+    const baseScope = this.settings.contextScopes.find((scope) => scope.id === session.contextScopeId);
+    if (session.contextMode === "follow" && this.settings.autoRecognizeActiveFile) {
+      return createSingleFileContextScope(
+        this.getActiveContextFilePath(),
+        "跟随当前文件",
+        baseScope?.allowCloudModels ?? true
+      );
+    }
+
+    if (session.contextMode === "follow" || session.contextMode === "locked") {
+      return createSingleFileContextScope(
+        session.contextFilePath,
+        session.contextMode === "locked" ? "已锁定文件" : "当前文件",
+        baseScope?.allowCloudModels ?? true
+      );
+    }
+
+    return session.contextScopeOverride || baseScope;
   }
 
   countFilesInContextScope(scope: ContextScope | undefined): number {
@@ -306,10 +346,11 @@ export default class ObsidianAIPlugin extends Plugin {
   async setActiveContextScope(scopeId: string): Promise<void> {
     await this.contextScopeManager.setActive(scopeId);
     const session = this.getActiveChatSession();
-    if (session.contextScopeOverride) {
-      session.contextScopeOverride = undefined;
-      await this.saveSettings();
-    }
+    session.contextScopeOverride = undefined;
+    session.contextMode = scopeId === CURRENT_FILE_SCOPE_ID ? "follow" : "manual";
+    session.contextFilePath = session.contextMode === "follow" ? this.getActiveContextFilePath() : "";
+    session.updatedAt = new Date().toISOString();
+    await this.saveSettings();
     await this.syncActiveChatSessionContext();
   }
 
@@ -320,7 +361,7 @@ export default class ObsidianAIPlugin extends Plugin {
       return;
     }
 
-    const normalizedFiles = normalizeVaultPaths(files).filter((path) => path.toLowerCase().endsWith(".md"));
+    const normalizedFiles = normalizeVaultPaths(files).filter(isContextFilePath);
     const normalizedFolders = normalizeVaultPaths(folders);
     const baseScope = this.settings.contextScopes.find((scope) => scope.id === session.contextScopeId);
     session.contextScopeOverride = {
@@ -336,10 +377,101 @@ export default class ObsidianAIPlugin extends Plugin {
       excludeRules: [],
       allowCloudModels: baseScope?.allowCloudModels ?? true
     };
+    session.contextMode = "manual";
+    session.contextFilePath = "";
     session.lockedFilePaths = [];
     session.lastContextFilePaths = [];
     session.updatedAt = new Date().toISOString();
     await this.saveSettings();
+  }
+
+  async setChatSessionContextMode(sessionId: string, mode: ChatContextMode): Promise<void> {
+    const session = this.settings.chatSessions.find((item) => item.id === sessionId);
+
+    if (!session) {
+      return;
+    }
+
+    if (mode === "follow") {
+      session.contextMode = "follow";
+      session.contextFilePath = this.getActiveContextFilePath();
+      session.contextScopeOverride = undefined;
+    } else if (mode === "locked") {
+      const filePath = this.getActiveContextFilePath() || this.contextScopeResolver.resolve(this.getChatSessionContextScope(session))[0]?.path;
+
+      if (!filePath) {
+        new Notice("请先打开要锁定的笔记、Canvas 或 Excalidraw 文件。");
+        return;
+      }
+
+      session.contextMode = "locked";
+      session.contextFilePath = filePath;
+      session.contextScopeOverride = undefined;
+    } else {
+      session.contextMode = "manual";
+    }
+
+    session.lockedFilePaths = [];
+    session.lastContextFilePaths = [];
+    session.updatedAt = new Date().toISOString();
+    await this.saveSettings();
+    this.refreshChatViews();
+  }
+
+  addSelectionReferences(references: SelectionReference[]): void {
+    if (references.length === 0) {
+      return;
+    }
+
+    const sessionId = this.getActiveChatSession().id;
+    const current = this.pendingSelectionReferences.get(sessionId) || [];
+    const merged = [...current];
+
+    for (const reference of references) {
+      const duplicate = merged.some((item) =>
+        item.filePath === reference.filePath &&
+        item.fromLine === reference.fromLine &&
+        item.fromCh === reference.fromCh &&
+        item.toLine === reference.toLine &&
+        item.toCh === reference.toCh &&
+        item.text === reference.text
+      );
+      if (!duplicate) {
+        merged.push(reference);
+      }
+    }
+
+    this.pendingSelectionReferences.set(sessionId, merged.slice(-20));
+    this.refreshChatViews();
+    new Notice(`已添加到对话上下文 · ${merged.length} 个选区`);
+  }
+
+  getPendingSelectionReferences(sessionId = this.getActiveChatSession().id): SelectionReference[] {
+    return [...(this.pendingSelectionReferences.get(sessionId) || [])];
+  }
+
+  removePendingSelectionReference(sessionId: string, referenceId: string): void {
+    const next = (this.pendingSelectionReferences.get(sessionId) || []).filter((item) => item.id !== referenceId);
+    this.pendingSelectionReferences.set(sessionId, next);
+    this.refreshChatViews();
+  }
+
+  clearPendingSelectionReferences(sessionId: string): void {
+    this.pendingSelectionReferences.delete(sessionId);
+    this.refreshChatViews();
+  }
+
+  private refreshChatViews(): void {
+    for (const leaf of this.app.workspace.getLeavesOfType(AI_CHAT_VIEW_TYPE)) {
+      if (leaf.view instanceof AIChatView) {
+        leaf.view.refreshExternalState();
+      }
+    }
+  }
+
+  private getActiveContextFilePath(): string {
+    const active = this.app.workspace.getActiveFile();
+    return isContextFile(active) ? active.path : this.getEditableMarkdownView()?.file?.path || "";
   }
 
   async addContextScope(scope: ContextScope): Promise<void> {
@@ -361,6 +493,8 @@ export default class ObsidianAIPlugin extends Plugin {
 
         session.contextScopeId = fallbackScopeId;
         session.contextScopeOverride = undefined;
+        session.contextMode = fallbackScopeId === CURRENT_FILE_SCOPE_ID ? "follow" : "manual";
+        session.contextFilePath = session.contextMode === "follow" ? this.getActiveContextFilePath() : "";
         session.lockedFilePaths = [];
         session.lastContextFilePaths = [];
         session.updatedAt = new Date().toISOString();
@@ -405,6 +539,9 @@ export default class ObsidianAIPlugin extends Plugin {
 
   async createChatSession(config?: Partial<ChatSessionConfig>): Promise<StoredChatSession> {
     const session = createChatSessionRecord(config?.contextScopeId || this.settings.activeContextScopeId, [], config);
+    if (session.contextMode === "follow" || session.contextMode === "locked") {
+      session.contextFilePath = this.getActiveContextFilePath();
+    }
     this.settings.chatSessions.unshift(session);
     this.settings.chatSessions = this.settings.chatSessions.slice(0, CHAT_SESSION_LIMIT);
     this.settings.activeChatSessionId = session.id;
@@ -430,6 +567,14 @@ export default class ObsidianAIPlugin extends Plugin {
 
     if (config.autoContext !== undefined) {
       session.autoContext = config.autoContext;
+    }
+
+    if (config.contextMode !== undefined) {
+      session.contextMode = config.contextMode;
+      if (config.contextMode === "follow" || config.contextMode === "locked") {
+        session.contextFilePath = this.getActiveContextFilePath() || session.contextFilePath;
+        session.contextScopeOverride = undefined;
+      }
     }
 
     if (config.contextScopeId && this.settings.contextScopes.some((scope) => scope.id === config.contextScopeId)) {
@@ -538,7 +683,7 @@ export default class ObsidianAIPlugin extends Plugin {
     const files = this.contextScopeResolver.resolve(scope);
 
     if (files.length === 0) {
-      new Notice("当前上下文范围内没有可索引的 Markdown 文件。");
+      new Notice("当前上下文范围内没有可索引的笔记、Canvas 或 Excalidraw 文件。");
       return;
     }
 
@@ -573,6 +718,7 @@ export default class ObsidianAIPlugin extends Plugin {
       defaultChatProviderId: saved?.defaultChatProviderId || DEFAULT_SETTINGS.defaultChatProviderId,
       defaultEditProviderId: saved?.defaultEditProviderId || DEFAULT_SETTINGS.defaultEditProviderId,
       activeContextScopeId: activeSession.contextScopeId,
+      autoRecognizeActiveFile: saved?.autoRecognizeActiveFile ?? DEFAULT_SETTINGS.autoRecognizeActiveFile,
       contextScopes,
       promptTemplates: normalizePromptTemplates(saved?.promptTemplates),
       chatSessions,
@@ -587,6 +733,8 @@ export default class ObsidianAIPlugin extends Plugin {
     await this.saveData(this.settings);
     this.providerRegistry?.update(this.settings.providers);
     this.templateService?.update(this.settings.promptTemplates);
+    this.refreshStatusBar();
+    this.refreshChatViews();
   }
 
   // --- Private ---
@@ -597,6 +745,46 @@ export default class ObsidianAIPlugin extends Plugin {
     if (activeView) {
       this.lastMarkdownView = activeView;
     }
+  }
+
+  private createStatusBarEntry(): void {
+    this.statusBarEl = this.addStatusBarItem();
+    this.statusBarEl.addClass("ai-second-brain-status");
+    const button = this.statusBarEl.createEl("button", {
+      cls: "ai-second-brain-status-button",
+      attr: { type: "button", "aria-label": "打开 AI Second Brain" }
+    });
+    button.addEventListener("click", () => {
+      void this.activateChatView();
+    });
+    this.refreshStatusBar();
+  }
+
+  private refreshStatusBar(): void {
+    const button = this.statusBarEl?.querySelector<HTMLButtonElement>(".ai-second-brain-status-button");
+    if (!button || !this.providerRegistry || !this.contextScopeResolver) {
+      return;
+    }
+
+    button.empty();
+    const icon = button.createSpan({ cls: "ai-second-brain-status-icon" });
+    setIcon(icon, "brain-circuit");
+    const provider =
+      this.providerRegistry.get(this.settings.defaultChatProviderId) ||
+      this.providerRegistry.getFirstAvailable();
+    const scope = this.getActiveContextScope();
+    const contextFiles = this.contextScopeResolver.resolve(scope);
+    const fileCount = contextFiles.length;
+    const session = this.getActiveChatSession();
+    const contextLabel = session.contextMode === "manual"
+      ? scope?.name || "无上下文"
+      : contextFiles[0]?.name || "无上下文";
+    const label = button.createSpan({ cls: "ai-second-brain-status-label" });
+    label.setText(provider ? `${contextLabel} · ${fileCount}` : "AI 未配置");
+    button.toggleClass("is-unavailable", !provider);
+    button.title = provider
+      ? `聊天服务：${provider.config.name}\n上下文：${contextLabel}\n授权文件：${fileCount}\n点击打开 AI`
+      : "尚未配置可用的 AI 服务商，点击打开 AI";
   }
 
   private createSelfCheckItems(): SelfCheckItem[] {
@@ -691,6 +879,8 @@ export default class ObsidianAIPlugin extends Plugin {
 
     session.contextScopeId = this.settings.activeContextScopeId;
     session.contextScopeOverride = undefined;
+    session.contextMode = session.contextScopeId === CURRENT_FILE_SCOPE_ID ? "follow" : "manual";
+    session.contextFilePath = this.getActiveContextFilePath();
     session.lockedFilePaths = [];
     session.lastContextFilePaths = [];
     session.updatedAt = new Date().toISOString();
@@ -706,6 +896,7 @@ function normalizeChatHistory(messages: StoredChatMessage[] | undefined): Stored
       role: message.role,
       content: message.content,
       citations: message.citations || [],
+      selectionReferences: normalizeSelectionReferences(message.selectionReferences),
       createdAt: message.createdAt || new Date().toISOString()
     }));
 }
@@ -729,6 +920,8 @@ function normalizeChatSessions(
         title: session.title || createChatSessionTitle(messages),
         contextScopeId: session.contextScopeId || contextScopeId,
         contextScopeOverride: normalizeSessionContextScope(session.contextScopeOverride),
+        contextMode: normalizeContextMode(session),
+        contextFilePath: isContextFilePath(session.contextFilePath || "") ? session.contextFilePath : "",
         purpose: session.purpose || "",
         autoContext: session.autoContext ?? true,
         lockedFilePaths: normalizeMarkdownPaths(session.lockedFilePaths || []),
@@ -753,6 +946,8 @@ function createChatSessionRecord(
     title: config.title?.trim() || createChatSessionTitle(messages),
     contextScopeId,
     contextScopeOverride: undefined,
+    contextMode: config.contextMode || (contextScopeId === CURRENT_FILE_SCOPE_ID ? "follow" : "manual"),
+    contextFilePath: "",
     purpose: config.purpose?.trim() || "",
     autoContext: config.autoContext ?? true,
     lockedFilePaths: normalizeMarkdownPaths(config.lockedFilePaths || []),
@@ -764,12 +959,62 @@ function createChatSessionRecord(
 }
 
 function normalizeMarkdownPaths(paths: string[]): string[] {
-  return Array.from(new Set(paths.map((path) => path.trim()).filter((path) => path.toLowerCase().endsWith(".md"))))
+  return Array.from(new Set(paths.map((path) => path.trim()).filter(isContextFilePath)))
     .slice(0, 8);
 }
 
 function normalizeVaultPaths(paths: string[]): string[] {
   return Array.from(new Set(paths.map((path) => path.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "").trim()).filter(Boolean)));
+}
+
+function normalizeContextMode(session: StoredChatSession): ChatContextMode {
+  if (session.contextMode === "follow" || session.contextMode === "locked" || session.contextMode === "manual") {
+    return session.contextMode;
+  }
+
+  if (session.contextScopeOverride) {
+    return "manual";
+  }
+
+  return session.contextScopeId === CURRENT_FILE_SCOPE_ID ? "follow" : "manual";
+}
+
+function normalizeSelectionReferences(references: SelectionReference[] | undefined): SelectionReference[] {
+  return (references || [])
+    .filter((reference) => Boolean(reference?.text?.trim()) && isContextFilePath(reference.filePath || ""))
+    .slice(0, 20)
+    .map((reference) => ({
+      id: reference.id || `selection-${crypto.randomUUID()}`,
+      filePath: reference.filePath,
+      fileName: reference.fileName || reference.filePath.split("/").pop() || reference.filePath,
+      fromLine: Math.max(0, reference.fromLine || 0),
+      fromCh: Math.max(0, reference.fromCh || 0),
+      toLine: Math.max(0, reference.toLine || reference.fromLine || 0),
+      toCh: Math.max(0, reference.toCh || 0),
+      text: reference.text
+    }));
+}
+
+function createSingleFileContextScope(
+  filePath: string | undefined,
+  name: string,
+  allowCloudModels: boolean
+): ContextScope | undefined {
+  if (!filePath || !isContextFilePath(filePath)) {
+    return undefined;
+  }
+
+  return {
+    id: `session-file-${filePath}`,
+    name,
+    mode: "files",
+    files: [filePath],
+    folders: [],
+    tags: [],
+    pathRules: [],
+    excludeRules: [],
+    allowCloudModels
+  };
 }
 
 function normalizeSessionContextScope(scope: ContextScope | undefined): ContextScope | undefined {

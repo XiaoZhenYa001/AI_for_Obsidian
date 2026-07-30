@@ -1,18 +1,11 @@
-import { App, FuzzySuggestModal, IconName, Notice, PluginSettingTab, setIcon, Setting, TFile, TFolder } from "obsidian";
+import { App, FuzzySuggestModal, IconName, PluginSettingTab, setIcon, Setting, TFile, TFolder } from "obsidian";
 import { ContextScope, ContextScopeMode, scopeModeLabel } from "../context/scope-types";
 import type ObsidianAIPlugin from "../main";
 import { AIProviderConfig, AIProviderType } from "../providers/types";
 import { BUILT_IN_PROMPT_TEMPLATES } from "../templates/built-in-templates";
 import { PromptTemplate, PromptTemplateOutputMode, PromptTemplateTask } from "../templates/types";
-
-const TEMPLATE_TASK_LABELS: Record<PromptTemplateTask, string> = {
-  "selection-explain": "解释",
-  "selection-summarize": "总结",
-  "selection-rewrite": "改写",
-  "selection-translate": "翻译",
-  "selection-expand": "扩写",
-  "selection-condense": "缩写",
-};
+import { configureProvider } from "./provider-config-modal";
+import { isContextFile } from "../utils/context-files";
 
 const TEMPLATE_TASK_DISPLAY: Record<PromptTemplateTask, string> = {
   "selection-explain": "解释选中文本",
@@ -45,6 +38,9 @@ function debouncedSave(fn: () => Promise<void>, delay = 500): void {
 }
 
 export class ObsidianAISettingTab extends PluginSettingTab {
+  private readonly expandedCards = new Set<string>();
+  private readonly initializedCards = new Set<string>();
+
   constructor(app: App, private readonly plugin: ObsidianAIPlugin) {
     super(app, plugin);
   }
@@ -55,17 +51,18 @@ export class ObsidianAISettingTab extends PluginSettingTab {
     containerEl.addClass("ai-second-brain-settings");
 
     this.renderSettingsHero(containerEl);
+    this.renderSettingsNavigation(containerEl);
     this.renderControlCenter(containerEl);
-    this.renderSettingsSection(containerEl, "server", "AI 服务商", "管理模型提供方、默认模型和任务分工。", (section) => {
+    this.renderSettingsSection(containerEl, "providers", "server", "AI 服务商", "管理模型提供方、默认模型和任务分工。", (section) => {
       this.renderProviderSection(section);
     });
-    this.renderSettingsSection(containerEl, "folder-lock", "上下文范围", "精确控制 AI 可以读取哪些 Markdown 文件。", (section) => {
+    this.renderSettingsSection(containerEl, "contexts", "folder-lock", "上下文范围", "精确控制 AI 可以读取哪些笔记、Canvas 和 Excalidraw 文件。", (section) => {
       this.renderContextSection(section);
     });
-    this.renderSettingsSection(containerEl, "scroll-text", "Prompt 模板", "维护右键菜单与命令面板使用的任务提示词。", (section) => {
+    this.renderSettingsSection(containerEl, "templates", "scroll-text", "Prompt 模板", "维护选区工具条与命令面板使用的任务提示词。", (section) => {
       this.renderTemplateSection(section);
     });
-    this.renderSettingsSection(containerEl, "workflow", "视觉图谱", "配置 Excalidraw 图谱的保存位置和生成边界。", (section) => {
+    this.renderSettingsSection(containerEl, "diagrams", "workflow", "视觉图谱", "配置 Excalidraw 图谱的保存位置和生成边界。", (section) => {
       this.renderDiagramSection(section);
     });
   }
@@ -81,14 +78,43 @@ export class ObsidianAISettingTab extends PluginSettingTab {
     });
   }
 
+  private renderSettingsNavigation(containerEl: HTMLElement): void {
+    const navigation = containerEl.createEl("nav", {
+      cls: "ai-second-brain-settings-navigation",
+      attr: { "aria-label": "设置分类" }
+    });
+    const items: Array<{ target: string; icon: IconName; label: string }> = [
+      { target: "ai-second-brain-settings-overview", icon: "layout-dashboard", label: "概览" },
+      { target: "ai-second-brain-settings-providers", icon: "server", label: "服务商" },
+      { target: "ai-second-brain-settings-contexts", icon: "folder-lock", label: "上下文" },
+      { target: "ai-second-brain-settings-templates", icon: "scroll-text", label: "模板" },
+      { target: "ai-second-brain-settings-diagrams", icon: "workflow", label: "图谱" }
+    ];
+
+    for (const item of items) {
+      const button = this.createIconButton(navigation, item.icon, item.label, "ai-second-brain-settings-navigation-item");
+      button.addEventListener("click", () => {
+        const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        document.getElementById(item.target)?.scrollIntoView({
+          behavior: reduceMotion ? "auto" : "smooth",
+          block: "start"
+        });
+      });
+    }
+  }
+
   private renderSettingsSection(
     containerEl: HTMLElement,
+    sectionId: string,
     iconName: IconName,
     title: string,
     description: string,
     renderBody: (section: HTMLElement) => void
   ): void {
-    const section = containerEl.createDiv({ cls: "ai-second-brain-settings-section" });
+    const section = containerEl.createDiv({
+      cls: "ai-second-brain-settings-section",
+      attr: { id: `ai-second-brain-settings-${sectionId}` }
+    });
     const header = section.createDiv({ cls: "ai-second-brain-settings-section-header" });
     const icon = header.createDiv({ cls: "ai-second-brain-settings-section-icon" });
     setIcon(icon, iconName);
@@ -104,7 +130,10 @@ export class ObsidianAISettingTab extends PluginSettingTab {
     const enabledProviders = this.plugin.settings.providers.filter((provider) => provider.enabled);
     const defaultChatProvider = this.findProvider(this.plugin.settings.defaultChatProviderId);
     const defaultEditProvider = this.findProvider(this.plugin.settings.defaultEditProviderId);
-    const card = containerEl.createDiv({ cls: "ai-second-brain-control-center" });
+    const card = containerEl.createDiv({
+      cls: "ai-second-brain-control-center",
+      attr: { id: "ai-second-brain-settings-overview" }
+    });
     const header = card.createDiv({ cls: "ai-second-brain-control-header" });
     const title = header.createDiv({ cls: "ai-second-brain-control-title" });
     title.createEl("h3", { text: "上下文控制中心" });
@@ -118,7 +147,7 @@ export class ObsidianAISettingTab extends PluginSettingTab {
 
     const stats = card.createDiv({ cls: "ai-second-brain-control-stats" });
     this.renderControlStat(stats, "激活范围", activeScope?.name || "未选择", activeScope ? scopeModeLabel(activeScope.mode) : "无可用范围");
-    this.renderControlStat(stats, "授权文件", `${activeFiles.length}`, activeFiles.length > 0 ? "个 Markdown 文件" : "当前范围为空");
+    this.renderControlStat(stats, "授权文件", `${activeFiles.length}`, activeFiles.length > 0 ? "个上下文文件" : "当前范围为空");
     this.renderControlStat(stats, "聊天模型", this.providerSummary(defaultChatProvider), defaultChatProvider?.enabled ? "可用" : "未启用或未设置");
     this.renderControlStat(stats, "编辑模型", this.providerSummary(defaultEditProvider), defaultEditProvider?.enabled ? "可用" : "未启用或未设置");
     this.renderControlStat(stats, "服务商", `${enabledProviders.length}/${this.plugin.settings.providers.length}`, "已启用 / 已配置");
@@ -160,7 +189,7 @@ export class ObsidianAISettingTab extends PluginSettingTab {
     if (files.length === 0) {
       preview.createDiv({
         cls: "ai-second-brain-authorized-empty",
-        text: "当前范围没有命中任何 Markdown 文件。AI 不会读取笔记内容。"
+        text: "当前范围没有命中任何可读取文件。AI 不会读取笔记内容。"
       });
       return;
     }
@@ -187,58 +216,96 @@ export class ObsidianAISettingTab extends PluginSettingTab {
   }
 
   private renderProviderSection(containerEl: HTMLElement): void {
+    const toolbar = containerEl.createDiv({ cls: "ai-second-brain-provider-toolbar" });
+    const toolbarCopy = toolbar.createDiv({ cls: "ai-second-brain-provider-toolbar-copy" });
+    toolbarCopy.createDiv({ cls: "ai-second-brain-provider-toolbar-title", text: "服务商配置" });
+    toolbarCopy.createDiv({
+      cls: "ai-second-brain-provider-toolbar-description",
+      text: "可以添加多套云端或本地 API，并为不同任务指定默认服务。"
+    });
+    const addButton = this.createIconButton(toolbar, "plus", "添加服务商", "mod-cta ai-second-brain-provider-add");
+    addButton.addEventListener("click", () => {
+      void this.openProviderCreator();
+    });
+
+    const routing = containerEl.createDiv({ cls: "ai-second-brain-provider-routing" });
+    const enabledProviders = this.plugin.settings.providers.filter((provider) => provider.enabled);
+    this.renderProviderRoute(
+      routing,
+      "默认聊天服务",
+      "用于侧边栏问答和多轮对话。",
+      this.plugin.settings.defaultChatProviderId,
+      enabledProviders,
+      async (providerId) => {
+        this.plugin.settings.defaultChatProviderId = providerId;
+        await this.plugin.saveSettings();
+        this.display();
+      }
+    );
+    this.renderProviderRoute(
+      routing,
+      "默认编辑服务",
+      "用于改写、生成内容和图谱结构。",
+      this.plugin.settings.defaultEditProviderId,
+      enabledProviders,
+      async (providerId) => {
+        this.plugin.settings.defaultEditProviderId = providerId;
+        await this.plugin.saveSettings();
+        this.display();
+      }
+    );
+
     if (this.plugin.settings.providers.length === 0) {
-      containerEl.createEl("p", {
-        cls: "ai-second-brain-muted",
-        text: "还没有配置服务商。可以先添加一个 OpenAI-compatible 或 Ollama 服务。"
+      const empty = containerEl.createDiv({ cls: "ai-second-brain-provider-empty" });
+      const icon = empty.createDiv({ cls: "ai-second-brain-provider-empty-icon" });
+      setIcon(icon, "server-off");
+      empty.createDiv({ cls: "ai-second-brain-provider-empty-title", text: "还没有 AI 服务商" });
+      empty.createDiv({
+        cls: "ai-second-brain-provider-empty-description",
+        text: "添加第一套 API 后，可以继续配置更多服务并分别分配任务。"
       });
+      return;
     }
 
     for (const provider of this.plugin.settings.providers) {
       this.renderProvider(containerEl, provider);
     }
+  }
 
+  private renderProviderRoute(
+    containerEl: HTMLElement,
+    name: string,
+    description: string,
+    value: string,
+    providers: AIProviderConfig[],
+    onChange: (providerId: string) => Promise<void>
+  ): void {
     new Setting(containerEl)
-      .setName("添加 OpenAI-compatible 服务")
-      .setDesc("适用于 OpenAI、DeepSeek 或兼容 /chat/completions 的服务。")
-      .addButton((button) =>
-        button.setButtonText("添加").onClick(async () => {
-          const provider = this.createProvider("openai-compatible");
-          provider.name = "OpenAI-compatible";
-          provider.baseUrl = "https://api.openai.com/v1";
-          provider.defaultModel = "gpt-4o-mini";
-          await this.plugin.addProvider(provider);
-          this.display();
-        })
-      );
+      .setName(name)
+      .setDesc(description)
+      .addDropdown((dropdown) => {
+        dropdown.addOption("", providers.length > 0 ? "自动选择可用服务" : "暂无已启用服务");
+        for (const provider of providers) {
+          dropdown.addOption(provider.id, `${provider.name} · ${provider.defaultModel || "未设置模型"}`);
+        }
+        dropdown.setValue(providers.some((provider) => provider.id === value) ? value : "");
+        dropdown.onChange((providerId) => {
+          void onChange(providerId);
+        });
+      });
+  }
 
-    new Setting(containerEl)
-      .setName("添加 Ollama 服务")
-      .setDesc("适用于本地 Ollama 模型。")
-      .addButton((button) =>
-        button.setButtonText("添加").onClick(async () => {
-          const provider = this.createProvider("ollama");
-          provider.name = "Ollama";
-          provider.baseUrl = "http://localhost:11434";
-          provider.defaultModel = "llama3.1";
-          await this.plugin.addProvider(provider);
-          this.display();
-        })
-      );
+  private async openProviderCreator(): Promise<void> {
+    const provider = await configureProvider(this.app);
 
-    new Setting(containerEl)
-      .setName("添加 Anthropic Claude 服务")
-      .setDesc("适用于 Anthropic Messages API。")
-      .addButton((button) =>
-        button.setButtonText("添加").onClick(async () => {
-          const provider = this.createProvider("anthropic");
-          provider.name = "Anthropic Claude";
-          provider.baseUrl = "https://api.anthropic.com/v1";
-          provider.defaultModel = "claude-3-5-sonnet-latest";
-          await this.plugin.addProvider(provider);
-          this.display();
-        })
-      );
+    if (!provider) {
+      return;
+    }
+
+    this.expandedCards.add(`provider:${provider.id}`);
+    this.initializedCards.add(`provider:${provider.id}`);
+    await this.plugin.addProvider(provider);
+    this.display();
   }
 
   private renderDiagramSection(containerEl: HTMLElement): void {
@@ -294,8 +361,15 @@ export class ObsidianAISettingTab extends PluginSettingTab {
   }
 
   private renderProvider(containerEl: HTMLElement, provider: AIProviderConfig): void {
-    const group = containerEl.createDiv({ cls: "ai-second-brain-settings-card" });
-    group.createEl("h4", { text: provider.name || "未命名服务商" });
+    const group = this.createSettingsDisclosure(
+      containerEl,
+      `provider:${provider.id}`,
+      "server",
+      provider.name || "未命名服务商",
+      `${providerTypeLabel(provider.type)} · ${provider.defaultModel || "未设置模型"}`,
+      this.providerStatusLabel(provider),
+      provider.id === this.plugin.settings.defaultChatProviderId || provider.id === this.plugin.settings.defaultEditProviderId
+    );
 
     new Setting(group)
       .setName("启用")
@@ -374,29 +448,24 @@ export class ObsidianAISettingTab extends PluginSettingTab {
       );
 
     new Setting(group)
-      .setName("设为默认聊天服务")
+      .setName("配置操作")
+      .setDesc("复制会保留接口参数和 Key，但不会改变当前默认任务路由。")
       .addButton((button) =>
-        button.setButtonText("设为默认").onClick(async () => {
-          this.plugin.settings.defaultChatProviderId = provider.id;
-          await this.plugin.saveSettings();
-          new Notice(`已将 ${provider.name} 设为默认聊天服务。`);
-          this.display();
-        })
-      );
-
-    new Setting(group)
-      .setName("设为默认编辑服务")
-      .addButton((button) =>
-        button.setButtonText("设为默认").onClick(async () => {
-          this.plugin.settings.defaultEditProviderId = provider.id;
-          await this.plugin.saveSettings();
-          new Notice(`已将 ${provider.name} 设为默认编辑服务。`);
-          this.display();
-        })
-      );
-
-    new Setting(group)
-      .setName("删除服务商")
+        button
+          .setIcon("copy-plus")
+          .setTooltip("复制服务商配置")
+          .onClick(async () => {
+            const copy: AIProviderConfig = {
+              ...provider,
+              id: `${provider.type}-${crypto.randomUUID()}`,
+              name: `${provider.name} 副本`
+            };
+            this.expandedCards.add(`provider:${copy.id}`);
+            this.initializedCards.add(`provider:${copy.id}`);
+            await this.plugin.addProvider(copy);
+            this.display();
+          })
+      )
       .addButton((button) =>
         button
           .setWarning()
@@ -411,7 +480,40 @@ export class ObsidianAISettingTab extends PluginSettingTab {
       );
   }
 
+  private providerStatusLabel(provider: AIProviderConfig): string {
+    if (!provider.enabled) {
+      return "已停用";
+    }
+
+    const roles: string[] = [];
+    if (provider.id === this.plugin.settings.defaultChatProviderId) {
+      roles.push("聊天");
+    }
+    if (provider.id === this.plugin.settings.defaultEditProviderId) {
+      roles.push("编辑");
+    }
+    return roles.length > 0 ? `默认：${roles.join("、")}` : "已启用";
+  }
+
   private renderContextSection(containerEl: HTMLElement): void {
+    new Setting(containerEl)
+      .setName("自动识别文件")
+      .setDesc("对话处于“跟随”状态时，切换笔记、Canvas 或 Excalidraw 会同步更新下一轮上下文。")
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.autoRecognizeActiveFile).onChange(async (value) => {
+          this.plugin.settings.autoRecognizeActiveFile = value;
+          if (!value) {
+            const activeFile = this.app.workspace.getActiveFile();
+            const session = this.plugin.getActiveChatSession();
+            if (session.contextMode === "follow" && isContextFile(activeFile)) {
+              session.contextFilePath = activeFile.path;
+            }
+          }
+          await this.plugin.saveSettings();
+          this.display();
+        })
+      );
+
     new Setting(containerEl)
       .setName("新增上下文范围")
       .setDesc("可以用文件、文件夹、标签或路径规则控制 AI 可访问内容。")
@@ -446,14 +548,16 @@ export class ObsidianAISettingTab extends PluginSettingTab {
   }
 
   private renderContextScope(containerEl: HTMLElement, scope: ContextScope): void {
-    const group = containerEl.createDiv({ cls: "ai-second-brain-settings-card" });
     const fileCount = this.plugin.countFilesInContextScope(scope);
-    const title = group.createDiv({ cls: "ai-second-brain-settings-card-title" });
-    title.createEl("h4", { text: scope.name || "未命名上下文" });
-    title.createSpan({
-      cls: "ai-second-brain-badge",
-      text: `${scopeModeLabel(scope.mode)} · ${fileCount} 个文件`
-    });
+    const group = this.createSettingsDisclosure(
+      containerEl,
+      `context:${scope.id}`,
+      scope.mode === "current-file" ? "file-text" : "folder-lock",
+      scope.name || "未命名上下文",
+      `${scopeModeLabel(scope.mode)} · ${fileCount} 个文件`,
+      scope.allowCloudModels ? "允许云端" : "仅限本地",
+      scope.id === this.plugin.settings.activeContextScopeId
+    );
 
     new Setting(group)
       .setName("名称")
@@ -493,12 +597,12 @@ export class ObsidianAISettingTab extends PluginSettingTab {
       );
 
     if (scope.mode === "files") {
-      this.renderListSetting(group, "文件路径", "逐条添加 Markdown 文件路径，例如 Projects/Plan.md。", scope.files, async (value) => {
+      this.renderListSetting(group, "文件路径", "逐条添加笔记、Canvas 或 Excalidraw 文件。", scope.files, async (value) => {
         scope.files = value;
         await this.plugin.saveSettings();
       }, {
         picker: "markdown-file",
-        placeholder: "Projects/Plan.md"
+        placeholder: "Projects/Plan.md 或 Board.canvas"
       });
     }
 
@@ -567,7 +671,7 @@ export class ObsidianAISettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("新增自定义模板")
-      .setDesc("同一任务有多个模板时，靠后的自定义模板会优先用于命令和右键菜单。")
+      .setDesc("同一任务有多个模板时，靠后的自定义模板会优先用于命令和选区工具条。")
       .addButton((button) =>
         button.setButtonText("添加").onClick(async () => {
           this.plugin.settings.promptTemplates.push(this.createPromptTemplate());
@@ -582,13 +686,15 @@ export class ObsidianAISettingTab extends PluginSettingTab {
   }
 
   private renderPromptTemplate(containerEl: HTMLElement, template: PromptTemplate): void {
-    const group = containerEl.createDiv({ cls: "ai-second-brain-settings-card" });
-    const title = group.createDiv({ cls: "ai-second-brain-settings-card-title" });
-    title.createEl("h4", { text: template.name || "未命名模板" });
-    title.createSpan({
-      cls: "ai-second-brain-badge",
-      text: TEMPLATE_TASK_LABELS[template.task]
-    });
+    const group = this.createSettingsDisclosure(
+      containerEl,
+      `template:${template.id}`,
+      "scroll-text",
+      template.name || "未命名模板",
+      TEMPLATE_TASK_DISPLAY[template.task],
+      template.builtIn ? "内置" : "自定义",
+      !template.builtIn
+    );
 
     new Setting(group)
       .setName("名称")
@@ -601,7 +707,7 @@ export class ObsidianAISettingTab extends PluginSettingTab {
 
     new Setting(group)
       .setName("任务类型")
-      .setDesc("内置模板的任务类型固定，用于命令面板和右键菜单路由。")
+      .setDesc("内置模板的任务类型固定，用于命令面板和选区工具条路由。")
       .addDropdown((dropdown) => {
         this.addTemplateTaskOptions(dropdown);
         dropdown.setValue(template.task);
@@ -840,20 +946,43 @@ export class ObsidianAISettingTab extends PluginSettingTab {
     return button;
   }
 
-  private createProvider(type: AIProviderType): AIProviderConfig {
-    const id = `${type}-${crypto.randomUUID()}`;
+  private createSettingsDisclosure(
+    containerEl: HTMLElement,
+    key: string,
+    iconName: IconName,
+    title: string,
+    description: string,
+    status: string,
+    defaultOpen: boolean
+  ): HTMLElement {
+    if (!this.initializedCards.has(key)) {
+      this.initializedCards.add(key);
+      if (defaultOpen) {
+        this.expandedCards.add(key);
+      }
+    }
 
-    return {
-      id,
-      name: type,
-      type,
-      baseUrl: "",
-      apiKey: "",
-      defaultModel: "",
-      temperature: 0.7,
-      stream: true,
-      enabled: true
-    };
+    const details = containerEl.createEl("details", {
+      cls: "ai-second-brain-settings-card ai-second-brain-settings-disclosure"
+    });
+    details.open = this.expandedCards.has(key);
+    const summary = details.createEl("summary", { cls: "ai-second-brain-settings-disclosure-summary" });
+    const icon = summary.createSpan({ cls: "ai-second-brain-settings-disclosure-icon" });
+    setIcon(icon, iconName);
+    const copy = summary.createSpan({ cls: "ai-second-brain-settings-disclosure-copy" });
+    copy.createSpan({ cls: "ai-second-brain-settings-disclosure-title", text: title });
+    copy.createSpan({ cls: "ai-second-brain-settings-disclosure-description", text: description });
+    summary.createSpan({ cls: "ai-second-brain-badge ai-second-brain-settings-disclosure-status", text: status });
+    const chevron = summary.createSpan({ cls: "ai-second-brain-settings-disclosure-chevron" });
+    setIcon(chevron, "chevron-down");
+    details.addEventListener("toggle", () => {
+      if (details.open) {
+        this.expandedCards.add(key);
+      } else {
+        this.expandedCards.delete(key);
+      }
+    });
+    return details.createDiv({ cls: "ai-second-brain-settings-disclosure-body" });
   }
 
   private createContextScope(mode: Exclude<ContextScopeMode, "current-file">): ContextScope {
@@ -899,6 +1028,18 @@ function normalizeListItem(value: string): string {
   return value.trim();
 }
 
+function providerTypeLabel(type: AIProviderType): string {
+  if (type === "openai-compatible") {
+    return "OpenAI-compatible";
+  }
+
+  if (type === "anthropic") {
+    return "Anthropic";
+  }
+
+  return "Ollama";
+}
+
 function normalizeTag(value: string): string {
   return value.trim().replace(/^#/, "");
 }
@@ -914,13 +1055,14 @@ class MarkdownFileSuggestModal extends FuzzySuggestModal<TFile> {
     private readonly onChoose: (file: TFile) => void
   ) {
     super(app);
-    this.setPlaceholder("选择 AI 可访问的 Markdown 文件");
+    this.setPlaceholder("选择 AI 可访问的笔记、Canvas 或 Excalidraw 文件");
   }
 
   getItems(): TFile[] {
     const existing = new Set(this.existingPaths);
     return this.app.vault
-      .getMarkdownFiles()
+      .getAllLoadedFiles()
+      .filter(isContextFile)
       .filter((file) => !existing.has(file.path))
       .sort((a, b) => a.path.localeCompare(b.path));
   }

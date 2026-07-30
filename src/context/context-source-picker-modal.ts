@@ -1,6 +1,7 @@
-import { App, Modal, setIcon, TFile, TFolder } from "obsidian";
+import { App, Modal, setIcon, TFolder } from "obsidian";
 import { ContextScope } from "./scope-types";
 import { createIconButton } from "../ui/icon-button";
+import { isContextFile } from "../utils/context-files";
 
 export type ContextSourceSelection = {
   files: string[];
@@ -46,7 +47,7 @@ class ContextSourcePickerModal extends Modal {
     this.selectedFiles = new Set(currentScope?.mode === "current-file" ? [] : currentScope?.files || []);
     this.selectedFolders = new Set(currentScope?.mode === "current-file" ? [] : currentScope?.folders || []);
 
-    for (const file of app.vault.getMarkdownFiles()) {
+    for (const file of app.vault.getAllLoadedFiles().filter(isContextFile)) {
       let parent = file.parent;
       while (parent?.path) {
         this.foldersWithMarkdown.add(parent.path);
@@ -171,7 +172,7 @@ class ContextSourcePickerModal extends Modal {
     if (items.length === 0 && (!this.currentFolder.path || this.query)) {
       this.listEl.createDiv({
         cls: "ai-second-brain-source-picker-empty",
-        text: this.query ? "当前目录没有匹配结果" : "当前目录没有 Markdown 文件或子文件夹"
+        text: this.query ? "当前目录没有匹配结果" : "当前目录没有可用笔记、Canvas、Excalidraw 或子文件夹"
       });
       return;
     }
@@ -210,7 +211,7 @@ class ContextSourcePickerModal extends Modal {
     row.toggleClass("is-selected", selected);
     const main = row.createEl("button", { cls: "ai-second-brain-source-picker-item-main", attr: { type: "button" } });
     const icon = main.createSpan({ cls: "ai-second-brain-source-picker-item-icon" });
-    setIcon(icon, item.type === "file" ? "file-text" : "folder");
+    setIcon(icon, item.type === "file" ? contextFileIcon(item.path) : "folder");
     const copy = main.createSpan({ cls: "ai-second-brain-source-picker-item-copy" });
     copy.createSpan({ cls: "ai-second-brain-source-picker-item-name", text: item.name });
     copy.createSpan({ cls: "ai-second-brain-source-picker-item-path", text: item.type === "folder" ? "文件夹" : item.path });
@@ -268,7 +269,7 @@ class ContextSourcePickerModal extends Modal {
   private getCurrentItems(): BrowserItem[] {
     return this.currentFolder.children
       .flatMap((item): BrowserItem[] => {
-        if (item instanceof TFile && item.extension === "md") {
+        if (isContextFile(item)) {
           return [{ type: "file", name: item.name, path: item.path }];
         }
         if (item instanceof TFolder && this.foldersWithMarkdown.has(item.path)) {
@@ -325,4 +326,15 @@ class ContextSourcePickerModal extends Modal {
     this.resolveResult({ files: Array.from(this.selectedFiles), folders: Array.from(this.selectedFolders) });
     this.close();
   }
+}
+
+function contextFileIcon(path: string): string {
+  const normalized = path.toLowerCase();
+  if (normalized.endsWith(".canvas")) {
+    return "layout-dashboard";
+  }
+  if (normalized.endsWith(".excalidraw") || normalized.endsWith(".excalidraw.md")) {
+    return "pencil-ruler";
+  }
+  return "file-text";
 }
