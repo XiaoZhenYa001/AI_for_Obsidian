@@ -10,12 +10,23 @@ import {
 } from "./types";
 
 export class KnowledgeAnalysisService {
+  private cachedReport?: {
+    signature: string;
+    report: KnowledgeHealthReport;
+  };
+
   constructor(private readonly app: App) {}
 
   async analyze(scopeName: string, files: TFile[]): Promise<KnowledgeHealthReport> {
+    const signature = createAnalysisSignature(scopeName, files);
+    if (this.cachedReport?.signature === signature) {
+      return this.cachedReport.report;
+    }
+
     const pathSet = new Set(files.map((file) => file.path));
     const incomingMap = this.buildIncomingLinkMap(pathSet);
     const contents = await Promise.all(files.map((file) => this.app.vault.cachedRead(file)));
+    const contentCache = new Map(files.map((file, index) => [file.path, contents[index].toLowerCase()]));
     const notes: KnowledgeNote[] = [];
 
     for (let i = 0; i < files.length; i++) {
@@ -45,7 +56,7 @@ export class KnowledgeAnalysisService {
       });
     }
 
-    return {
+    const report: KnowledgeHealthReport = {
       scopeName,
       generatedAt: new Date().toISOString(),
       notes,
@@ -53,9 +64,11 @@ export class KnowledgeAnalysisService {
       missingFrontmatter: notes.filter((note) => !note.hasFrontmatter),
       missingSummary: notes.filter((note) => !note.hasSummary),
       duplicateGroups: findDuplicateGroups(notes),
-      linkSuggestions: await this.findLinkSuggestions(notes, pathSet),
+      linkSuggestions: await this.findLinkSuggestions(notes, pathSet, contentCache),
       tagStats: buildTagStats(notes)
     };
+    this.cachedReport = { signature, report };
+    return report;
   }
 
   generateMocDraft(report: KnowledgeHealthReport): string {
@@ -224,10 +237,13 @@ export class KnowledgeAnalysisService {
     return incoming;
   }
 
-  private async findLinkSuggestions(notes: KnowledgeNote[], pathSet: Set<string>): Promise<LinkSuggestion[]> {
+  private async findLinkSuggestions(
+    notes: KnowledgeNote[],
+    pathSet: Set<string>,
+    contentCache: Map<string, string>
+  ): Promise<LinkSuggestion[]> {
     const suggestions: LinkSuggestion[] = [];
     const notesByPath = new Map(notes.map((note) => [note.path, note]));
-    const contentCache = new Map<string, string>();
 
     for (const source of notes) {
       let content = contentCache.get(source.path);
@@ -277,6 +293,15 @@ export class KnowledgeAnalysisService {
 
 function readTitle(file: TFile, frontmatterTitle: unknown): string {
   return typeof frontmatterTitle === "string" && frontmatterTitle.trim() ? frontmatterTitle.trim() : file.basename;
+}
+
+function createAnalysisSignature(scopeName: string, files: TFile[]): string {
+  return [
+    scopeName,
+    ...files
+      .map((file) => `${file.path}:${file.stat.mtime}:${file.stat.size}`)
+      .sort()
+  ].join("\n");
 }
 
 function readFolder(path: string): string {

@@ -22,6 +22,7 @@ export type ChatOptions = {
   retrievalQuery?: string;
   contextFilePaths?: string[];
   lockedFilePaths?: string[];
+  ensureFileCoverage?: boolean;
   systemInstruction?: string;
 };
 
@@ -113,8 +114,12 @@ export class ChatService {
     const messages: ChatMessage[] = [
       {
         role: "system",
-        content:
-          "你是 Obsidian 中的 AI 第二大脑助手。回答应清晰、准确、克制。若使用了授权笔记上下文，请尽量用 [1]、[2] 这样的编号标注依据；如果上下文不足，请直接说明。"
+        content: [
+          "你是 Obsidian 中的 AI 第二大脑助手。回答应清晰、准确、克制。",
+          "若使用了授权笔记上下文，请尽量用 [1]、[2] 这样的编号标注依据；如果上下文不足，请直接说明。",
+          "当用户要求流程图、时序图、状态图、决策树或系统架构图时，优先输出 Obsidian 可直接渲染的 \`\`\`mermaid 代码块。",
+          "Mermaid 应使用兼容语法，节点文字包含空格或标点时使用双引号，不要在图中使用 HTML。"
+        ].join("\n")
       }
     ];
 
@@ -185,6 +190,19 @@ export class ChatService {
 
     const retrievedChunks = await this.plugin.textSearchService.search(query, files, 8);
     const retrievedIds = new Set(retrievedChunks.map((chunk) => chunk.id));
+    if (options.ensureFileCoverage) {
+      const representedPaths = new Set(retrievedChunks.map((chunk) => chunk.filePath));
+      const missingFiles = selectedFiles.filter((file) => !representedPaths.has(file.path));
+      const coverageChunks = compactCoverageChunks(
+        await this.plugin.textSearchService.getRepresentativeChunks(missingFiles)
+      );
+      for (const chunk of coverageChunks) {
+        if (!retrievedIds.has(chunk.id)) {
+          retrievedChunks.push(chunk);
+          retrievedIds.add(chunk.id);
+        }
+      }
+    }
     const embeddedFiles = this.resolveEmbeddedFiles(retrievedChunks, authorizedByPath);
     const embeddedChunks = await this.plugin.textSearchService.getRepresentativeChunks(embeddedFiles);
 
@@ -254,6 +272,21 @@ export class ChatService {
 
 function uniqueFiles<T extends { path: string }>(files: T[]): T[] {
   return Array.from(new Map(files.map((file) => [file.path, file])).values());
+}
+
+function compactCoverageChunks(chunks: RetrievedChunk[]): RetrievedChunk[] {
+  if (chunks.length === 0) {
+    return [];
+  }
+
+  const maxCharsPerFile = Math.max(320, Math.min(1200, Math.floor(28000 / chunks.length)));
+  return chunks.map((chunk) => ({
+    ...chunk,
+    content: trimContent(chunk.content, maxCharsPerFile),
+    semanticContext: chunk.semanticContext
+      ? trimContent(chunk.semanticContext, Math.min(600, maxCharsPerFile))
+      : undefined
+  }));
 }
 
 function trimHistory(history: ChatMessage[]): ChatMessage[] {

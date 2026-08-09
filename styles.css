@@ -1511,7 +1511,11 @@
 }
 
 .ai-second-brain-message-assistant {
-  border-left: 2px solid var(--ai-second-brain-border);
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  padding: 10px 2px;
 }
 
 .ai-second-brain-message-error {
@@ -1533,11 +1537,23 @@
 
 .ai-second-brain-message-content {
   color: var(--text-normal);
+  cursor: text;
   font-size: 13px;
   line-height: 1.58;
   overflow-wrap: anywhere;
+  -webkit-user-select: text;
+  user-select: text;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.ai-second-brain-message-content * {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.ai-second-brain-message-content ::selection {
+  background: color-mix(in srgb, var(--interactive-accent) 28%, transparent);
 }
 
 .ai-second-brain-message-content.is-rendered-markdown {
@@ -1577,6 +1593,329 @@
 
 .ai-second-brain-message-content.is-rendered-markdown table {
   display: block;
+}
+
+.ai-second-brain-message-content.is-rendered-markdown .mermaid {
+  max-width: 100%;
+  overflow-x: auto;
+  padding: 8px 0;
+}
+
+.ai-second-brain-message-content.is-rendered-markdown .mermaid svg {
+  display: block;
+  height: auto;
+  max-width: 100%;
+}
+
+/* Mermaid diagrams share one restrained artifact surface in chat and reading view. */
+.ai-second-brain-mermaid-artifact {
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  color: var(--text-normal);
+  margin: 12px 0;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.ai-second-brain-mermaid-header {
+  align-items: center;
+  background: var(--background-secondary-alt);
+  border-bottom: 1px solid var(--background-modifier-border);
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  min-height: 42px;
+  padding: 5px 7px 5px 11px;
+}
+
+.ai-second-brain-mermaid-identity,
+.ai-second-brain-mermaid-controls,
+.ai-second-brain-mermaid-tabs {
+  align-items: center;
+  display: flex;
+}
+
+.ai-second-brain-mermaid-identity {
+  gap: 7px;
+  min-width: 0;
+}
+
+.ai-second-brain-mermaid-icon {
+  color: var(--text-muted);
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+
+.ai-second-brain-mermaid-icon svg {
+  height: 15px;
+  width: 15px;
+}
+
+.ai-second-brain-mermaid-title {
+  font-size: 12px;
+  font-weight: 620;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.ai-second-brain-mermaid-controls {
+  flex: 0 0 auto;
+  gap: 4px;
+}
+
+.ai-second-brain-mermaid-tabs {
+  background: var(--background-modifier-hover);
+  border-radius: 6px;
+  gap: 1px;
+  padding: 2px;
+}
+
+button.ai-second-brain-mermaid-tab,
+button.ai-second-brain-mermaid-action {
+  box-shadow: none;
+  letter-spacing: 0;
+  margin: 0;
+}
+
+button.ai-second-brain-mermaid-tab {
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 560;
+  height: 26px;
+  line-height: 26px;
+  padding: 0 9px;
+}
+
+button.ai-second-brain-mermaid-tab.is-active {
+  background: var(--background-primary);
+  color: var(--text-normal);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+
+button.ai-second-brain-mermaid-tab:hover:not(:disabled) {
+  color: var(--text-normal);
+}
+
+button.ai-second-brain-mermaid-action {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: 5px;
+  color: var(--text-muted);
+  display: inline-flex;
+  height: 28px;
+  justify-content: center;
+  padding: 0;
+  width: 28px;
+}
+
+button.ai-second-brain-mermaid-action:hover:not(:disabled),
+button.ai-second-brain-mermaid-action:focus-visible {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
+button.ai-second-brain-mermaid-action svg {
+  height: 14px;
+  width: 14px;
+}
+
+.ai-second-brain-mermaid-body {
+  min-height: 112px;
+  position: relative;
+}
+
+.ai-second-brain-mermaid-preview {
+  align-items: center;
+  display: flex;
+  justify-content: center;
+  max-height: 520px;
+  min-height: 112px;
+  overflow: auto;
+  padding: 18px;
+}
+
+.ai-second-brain-mermaid-preview[hidden],
+.ai-second-brain-mermaid-source[hidden] {
+  display: none;
+}
+
+.ai-second-brain-mermaid-preview > .mermaid {
+  margin: 0;
+  max-width: 100%;
+  padding: 0;
+}
+
+.ai-second-brain-mermaid-preview svg {
+  display: block;
+  height: auto;
+  max-width: 100%;
+}
+
+.ai-second-brain-mermaid-source {
+  background: var(--code-background);
+  border: 0;
+  border-radius: 0;
+  box-sizing: border-box;
+  font-size: 12px;
+  line-height: 1.55;
+  margin: 0;
+  max-height: 520px;
+  min-height: 112px;
+  overflow: auto;
+  padding: 16px 18px;
+  user-select: text;
+  white-space: pre;
+  width: 100%;
+}
+
+.ai-second-brain-mermaid-artifact.is-fullscreen {
+  bottom: 12px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.22);
+  display: flex;
+  flex-direction: column;
+  left: 12px;
+  margin: 0;
+  position: fixed;
+  right: 12px;
+  top: 12px;
+  z-index: var(--layer-modal);
+}
+
+.ai-second-brain-mermaid-artifact.is-fullscreen .ai-second-brain-mermaid-body,
+.ai-second-brain-mermaid-artifact.is-fullscreen .ai-second-brain-mermaid-preview,
+.ai-second-brain-mermaid-artifact.is-fullscreen .ai-second-brain-mermaid-source {
+  flex: 1 1 auto;
+  max-height: none;
+  min-height: 0;
+}
+
+.ai-second-brain-inline-citation {
+  align-items: center;
+  background: color-mix(in srgb, var(--interactive-accent) 12%, transparent);
+  border: 0;
+  border-radius: 4px;
+  box-shadow: none;
+  color: var(--interactive-accent);
+  cursor: pointer;
+  display: inline-flex;
+  font-size: 9px;
+  font-weight: 700;
+  height: 15px;
+  justify-content: center;
+  line-height: 15px;
+  margin: 0 2px;
+  padding: 0;
+  position: relative;
+  top: -0.28em;
+  vertical-align: baseline;
+  width: 17px;
+}
+
+.ai-second-brain-inline-citation:hover,
+.ai-second-brain-inline-citation:focus-visible {
+  background: color-mix(in srgb, var(--interactive-accent) 20%, transparent);
+  box-shadow: none;
+  color: var(--interactive-accent);
+  outline: none;
+}
+
+.ai-second-brain-inline-citation-preview {
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.16);
+  box-sizing: border-box;
+  color: var(--text-normal);
+  cursor: pointer;
+  display: grid;
+  gap: 5px;
+  max-height: 240px;
+  opacity: 0;
+  overflow: hidden;
+  padding: 11px 12px;
+  pointer-events: none;
+  position: fixed;
+  text-align: left;
+  top: 0;
+  transform: translateY(3px);
+  transition: opacity 120ms ease, transform 120ms ease;
+  visibility: hidden;
+  white-space: normal;
+  z-index: var(--layer-popover);
+}
+
+.ai-second-brain-inline-citation:hover .ai-second-brain-inline-citation-preview,
+.ai-second-brain-inline-citation:focus-visible .ai-second-brain-inline-citation-preview {
+  opacity: 1;
+  transform: translateY(0);
+  visibility: visible;
+}
+
+.ai-second-brain-inline-citation-preview.is-below {
+  transform: translateY(-3px);
+}
+
+.ai-second-brain-inline-citation:hover .ai-second-brain-inline-citation-preview.is-below,
+.ai-second-brain-inline-citation:focus-visible .ai-second-brain-inline-citation-preview.is-below {
+  transform: translateY(0);
+}
+
+.ai-second-brain-inline-citation-preview-title,
+.ai-second-brain-inline-citation-preview-path,
+.ai-second-brain-inline-citation-preview-excerpt {
+  display: block;
+  letter-spacing: 0;
+}
+
+.ai-second-brain-inline-citation-preview-title {
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1.4;
+}
+
+.ai-second-brain-inline-citation-preview-path {
+  color: var(--text-faint);
+  font-size: 10px;
+  line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-second-brain-inline-citation-preview-excerpt {
+  border-top: 1px solid var(--background-modifier-border);
+  color: var(--text-muted);
+  display: -webkit-box;
+  font-size: 11px;
+  line-height: 1.5;
+  margin-top: 2px;
+  overflow: hidden;
+  padding-top: 7px;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 5;
+}
+
+@media (max-width: 480px) {
+  .ai-second-brain-mermaid-header {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 5px;
+    padding: 8px;
+  }
+
+  .ai-second-brain-mermaid-controls {
+    justify-content: space-between;
+    width: 100%;
+  }
+
+  .ai-second-brain-mermaid-preview {
+    padding: 12px;
+  }
 }
 
 .ai-second-brain-thinking {
@@ -1620,6 +1959,8 @@
   height: 1em;
   margin-left: 2px;
   transform: translateY(2px);
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 .ai-second-brain-citations {
@@ -1737,11 +2078,20 @@
 }
 
 .ai-second-brain-citations-title {
+  align-items: center;
   color: var(--text-muted);
+  display: flex;
   font-size: 11px;
   font-weight: 600;
+  gap: 6px;
   line-height: 1.2;
   margin-bottom: 7px;
+}
+
+.ai-second-brain-citations-count {
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
 }
 
 .ai-second-brain-citation {
@@ -1762,6 +2112,10 @@
 
 .ai-second-brain-citation:hover {
   background: var(--ai-second-brain-surface-hover);
+}
+
+.ai-second-brain-citation.is-list-hidden {
+  display: none;
 }
 
 .ai-second-brain-citation-summary {
@@ -1838,6 +2192,40 @@
   margin-top: 8px;
 }
 
+.ai-second-brain-citations-more {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: 5px;
+  box-shadow: none;
+  color: var(--text-muted);
+  display: inline-flex;
+  font-size: 11px;
+  gap: 4px;
+  height: 28px;
+  justify-content: flex-start;
+  letter-spacing: 0;
+  margin: 1px 0 0;
+  padding: 0 5px;
+}
+
+.ai-second-brain-citations-more:hover,
+.ai-second-brain-citations-more:focus-visible {
+  background: var(--background-modifier-hover);
+  box-shadow: none;
+  color: var(--text-normal);
+}
+
+.ai-second-brain-citations-more-icon {
+  align-items: center;
+  display: inline-flex;
+}
+
+.ai-second-brain-citations-more-icon svg {
+  height: 13px;
+  width: 13px;
+}
+
 @keyframes ai-second-brain-citation-detail-enter {
   from {
     opacity: 0;
@@ -1875,23 +2263,71 @@
 
 .ai-second-brain-composer-references.is-visible {
   display: block;
+  padding-bottom: 2px;
 }
 
 .ai-second-brain-composer-references-header {
   align-items: center;
   color: var(--text-muted);
   display: flex;
-  font-size: 11px;
-  font-weight: 600;
-  height: 24px;
+  height: 28px;
   justify-content: space-between;
+  padding: 0 1px 3px;
+}
+
+.ai-second-brain-composer-references-title {
+  align-items: center;
+  display: inline-flex;
+  font-size: 11px;
+  font-weight: 650;
+  gap: 6px;
+  min-width: 0;
+}
+
+.ai-second-brain-composer-references-title-icon {
+  align-items: center;
+  color: var(--text-faint);
+  display: inline-flex;
+  height: 13px;
+  justify-content: center;
+  width: 13px;
+}
+
+.ai-second-brain-composer-references-title-icon svg {
+  height: 13px;
+  width: 13px;
+}
+
+.ai-second-brain-composer-references-count {
+  align-items: center;
+  background: var(--background-modifier-hover);
+  border-radius: 999px;
+  color: var(--text-muted);
+  display: inline-flex;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  height: 17px;
+  justify-content: center;
+  min-width: 17px;
+  padding: 0 5px;
 }
 
 .ai-second-brain-composer-references-clear {
-  height: 22px;
-  min-width: 22px;
+  appearance: none;
+  background: transparent;
+  border: 0;
+  border-radius: 5px;
+  box-shadow: none;
+  color: var(--text-faint);
+  height: 24px;
+  min-width: 24px;
   padding: 0;
-  width: 22px;
+  width: 24px;
+}
+
+.ai-second-brain-composer-references-clear:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
 }
 
 .ai-second-brain-composer-references-clear .ai-second-brain-button-label,
@@ -1900,23 +2336,70 @@
 }
 
 .ai-second-brain-composer-reference-list {
-  display: flex;
+  background: color-mix(in srgb, var(--background-secondary) 72%, transparent);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 7px;
+  max-height: 132px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 3px;
+}
+
+.ai-second-brain-composer-reference-group + .ai-second-brain-composer-reference-group {
+  border-top: 1px solid var(--background-modifier-border);
+  margin-top: 3px;
+  padding-top: 3px;
+}
+
+.ai-second-brain-composer-reference-group-header {
+  align-items: center;
+  color: var(--text-muted);
+  display: grid;
   gap: 6px;
-  max-height: 66px;
-  overflow-x: auto;
-  padding: 1px 0 3px;
+  grid-template-columns: 14px minmax(0, 1fr) auto;
+  min-height: 25px;
+  padding: 2px 7px;
+}
+
+.ai-second-brain-composer-reference-file-icon {
+  align-items: center;
+  color: var(--text-faint);
+  display: inline-flex;
+  height: 13px;
+  justify-content: center;
+  width: 13px;
+}
+
+.ai-second-brain-composer-reference-file-icon svg {
+  height: 13px;
+  width: 13px;
+}
+
+.ai-second-brain-composer-reference-file-name {
+  font-size: 11px;
+  font-weight: 650;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-second-brain-composer-reference-file-count {
+  color: var(--text-faint);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
 }
 
 .ai-second-brain-composer-reference {
   align-items: center;
-  background: var(--background-secondary);
-  border: 1px solid var(--background-modifier-border);
-  border-radius: 6px;
+  border-radius: 5px;
   display: flex;
-  flex: 0 0 auto;
-  height: 31px;
-  max-width: 240px;
+  height: 28px;
   min-width: 0;
+}
+
+.ai-second-brain-composer-reference:hover,
+.ai-second-brain-composer-reference:focus-within {
+  background: var(--background-modifier-hover);
 }
 
 .ai-second-brain-composer-reference-open {
@@ -1926,32 +2409,30 @@
   border: 0;
   box-shadow: none;
   color: var(--text-muted);
-  display: flex;
-  gap: 6px;
-  height: 29px;
+  display: grid;
+  flex: 1 1 auto;
+  gap: 8px;
+  grid-template-columns: auto minmax(0, 1fr);
+  height: 28px;
   min-width: 0;
-  padding: 0 5px 0 8px;
+  padding: 0 4px 0 27px;
+  text-align: left;
 }
 
 .ai-second-brain-composer-reference-open:hover {
   color: var(--text-normal);
 }
 
-.ai-second-brain-composer-reference-icon {
-  align-items: center;
-  display: inline-flex;
+.ai-second-brain-composer-reference-line {
+  color: var(--text-muted);
   flex: 0 0 auto;
-  height: 14px;
-  justify-content: center;
-  width: 14px;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
-.ai-second-brain-composer-reference-icon svg {
-  height: 14px;
-  width: 14px;
-}
-
-.ai-second-brain-composer-reference-label {
+.ai-second-brain-composer-reference-excerpt {
+  color: var(--text-faint);
   font-size: 11px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1959,12 +2440,35 @@
 }
 
 .ai-second-brain-composer-reference-remove {
+  appearance: none;
+  background: transparent;
+  border: 0;
   border-radius: 4px;
+  box-shadow: none;
+  color: var(--text-faint);
   flex: 0 0 auto;
-  height: 22px;
-  min-width: 22px;
+  height: 21px;
+  min-width: 21px;
+  opacity: 0;
   padding: 0;
-  width: 22px;
+  transition: opacity 100ms ease, background-color 100ms ease, color 100ms ease;
+  width: 21px;
+}
+
+.ai-second-brain-composer-reference:hover .ai-second-brain-composer-reference-remove,
+.ai-second-brain-composer-reference:focus-within .ai-second-brain-composer-reference-remove {
+  opacity: 1;
+}
+
+.ai-second-brain-composer-reference-remove:hover {
+  background: color-mix(in srgb, var(--text-error) 10%, transparent);
+  color: var(--text-error);
+}
+
+@media (hover: none) {
+  .ai-second-brain-composer-reference-remove {
+    opacity: 1;
+  }
 }
 
 .ai-second-brain-input {

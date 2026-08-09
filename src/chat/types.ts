@@ -33,6 +33,7 @@ export type StoredChatSession = {
   autoContext: boolean;
   lockedFilePaths: string[];
   lastContextFilePaths: string[];
+  lastContextFingerprint: string;
   messages: StoredChatMessage[];
   createdAt: string;
   updatedAt: string;

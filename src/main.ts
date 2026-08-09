@@ -32,6 +32,7 @@ import { TemplateService } from "./templates/template-service";
 import { PromptTemplate } from "./templates/types";
 import { isContextFile, isContextFilePath } from "./utils/context-files";
 import { createSelectionToolbarExtension } from "./ui/selection-toolbar";
+import { enhanceMermaidArtifacts, extractMermaidSources } from "./ui/mermaid-artifact";
 
 const CHAT_MESSAGE_LIMIT = 40;
 const CHAT_SESSION_LIMIT = 30;
@@ -75,6 +76,13 @@ export default class ObsidianAIPlugin extends Plugin {
     this.draftManager = new DraftManager(this);
     this.diagramService = new DiagramService(this);
     this.registerEditorExtension(createSelectionToolbarExtension(this));
+    this.registerMarkdownPostProcessor((element, context) => {
+      if (element.closest(".ai-second-brain-message-content, .ai-second-brain-chat-render-staging")) {
+        return;
+      }
+      const section = context.getSectionInfo(element);
+      enhanceMermaidArtifacts(element, extractMermaidSources(section?.text || ""));
+    });
 
     this.registerView(AI_CHAT_VIEW_TYPE, (leaf) => new AIChatView(leaf, this));
     this.captureActiveMarkdownView();
@@ -349,6 +357,9 @@ export default class ObsidianAIPlugin extends Plugin {
     session.contextScopeOverride = undefined;
     session.contextMode = scopeId === CURRENT_FILE_SCOPE_ID ? "follow" : "manual";
     session.contextFilePath = session.contextMode === "follow" ? this.getActiveContextFilePath() : "";
+    session.lockedFilePaths = [];
+    session.lastContextFilePaths = [];
+    session.lastContextFingerprint = "";
     session.updatedAt = new Date().toISOString();
     await this.saveSettings();
     await this.syncActiveChatSessionContext();
@@ -381,6 +392,7 @@ export default class ObsidianAIPlugin extends Plugin {
     session.contextFilePath = "";
     session.lockedFilePaths = [];
     session.lastContextFilePaths = [];
+    session.lastContextFingerprint = "";
     session.updatedAt = new Date().toISOString();
     await this.saveSettings();
   }
@@ -413,6 +425,7 @@ export default class ObsidianAIPlugin extends Plugin {
 
     session.lockedFilePaths = [];
     session.lastContextFilePaths = [];
+    session.lastContextFingerprint = "";
     session.updatedAt = new Date().toISOString();
     await this.saveSettings();
     this.refreshChatViews();
@@ -497,6 +510,7 @@ export default class ObsidianAIPlugin extends Plugin {
         session.contextFilePath = session.contextMode === "follow" ? this.getActiveContextFilePath() : "";
         session.lockedFilePaths = [];
         session.lastContextFilePaths = [];
+        session.lastContextFingerprint = "";
         session.updatedAt = new Date().toISOString();
       }
 
@@ -570,10 +584,15 @@ export default class ObsidianAIPlugin extends Plugin {
     }
 
     if (config.contextMode !== undefined) {
+      const changedMode = session.contextMode !== config.contextMode;
       session.contextMode = config.contextMode;
       if (config.contextMode === "follow" || config.contextMode === "locked") {
         session.contextFilePath = this.getActiveContextFilePath() || session.contextFilePath;
         session.contextScopeOverride = undefined;
+      }
+      if (changedMode) {
+        session.lastContextFilePaths = [];
+        session.lastContextFingerprint = "";
       }
     }
 
@@ -584,6 +603,7 @@ export default class ObsidianAIPlugin extends Plugin {
         session.contextScopeOverride = undefined;
         session.lockedFilePaths = [];
         session.lastContextFilePaths = [];
+        session.lastContextFingerprint = "";
       }
       if (session.id === this.settings.activeChatSessionId) {
         this.settings.activeContextScopeId = config.contextScopeId;
@@ -602,7 +622,8 @@ export default class ObsidianAIPlugin extends Plugin {
   async saveChatSessionContext(
     sessionId: string,
     selectedFilePaths: string[],
-    lockedFilePaths: string[]
+    lockedFilePaths: string[],
+    fingerprint: string
   ): Promise<void> {
     const session = this.settings.chatSessions.find((item) => item.id === sessionId);
 
@@ -612,6 +633,7 @@ export default class ObsidianAIPlugin extends Plugin {
 
     session.lastContextFilePaths = normalizeMarkdownPaths(selectedFilePaths);
     session.lockedFilePaths = normalizeMarkdownPaths(lockedFilePaths);
+    session.lastContextFingerprint = fingerprint;
     await this.saveSettings();
   }
 
@@ -883,6 +905,7 @@ export default class ObsidianAIPlugin extends Plugin {
     session.contextFilePath = this.getActiveContextFilePath();
     session.lockedFilePaths = [];
     session.lastContextFilePaths = [];
+    session.lastContextFingerprint = "";
     session.updatedAt = new Date().toISOString();
     await this.saveSettings();
   }
@@ -926,6 +949,7 @@ function normalizeChatSessions(
         autoContext: session.autoContext ?? true,
         lockedFilePaths: normalizeMarkdownPaths(session.lockedFilePaths || []),
         lastContextFilePaths: normalizeMarkdownPaths(session.lastContextFilePaths || []),
+        lastContextFingerprint: session.lastContextFingerprint || "",
         messages,
         createdAt,
         updatedAt: session.updatedAt || messages[messages.length - 1]?.createdAt || createdAt
@@ -952,6 +976,7 @@ function createChatSessionRecord(
     autoContext: config.autoContext ?? true,
     lockedFilePaths: normalizeMarkdownPaths(config.lockedFilePaths || []),
     lastContextFilePaths: [],
+    lastContextFingerprint: "",
     messages: messages.slice(-CHAT_MESSAGE_LIMIT),
     createdAt: messages[0]?.createdAt || now,
     updatedAt: messages[messages.length - 1]?.createdAt || now

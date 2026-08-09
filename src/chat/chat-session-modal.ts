@@ -113,8 +113,8 @@ class ChatSessionModal extends Modal {
       });
 
     new Setting(form)
-      .setName("发送前确认上下文")
-      .setDesc("根据问题自动选择相关文件，并在发送前允许调整或锁定")
+      .setName("自动选择并确认上下文")
+      .setDesc("首次使用或文件范围变化时允许调整，之后持续复用确认结果")
       .addToggle((toggle) => {
         toggle.setValue(this.autoContext).onChange((value) => {
           this.autoContext = value;

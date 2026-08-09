@@ -12,6 +12,7 @@ type ContextSelectionOptions = {
   files: TFile[];
   relevantFiles: RelevantFile[];
   lockedFilePaths: string[];
+  selectAllByDefault?: boolean;
 };
 
 const MAX_LOCKED_FILES = 8;
@@ -41,6 +42,12 @@ class ContextSelectionModal extends Modal {
   ) {
     super(app);
 
+    if (options.selectAllByDefault) {
+      for (const file of options.files) {
+        this.selected.add(file.path);
+      }
+    }
+
     for (const item of options.relevantFiles) {
       this.relevance.set(item.filePath, item);
       this.selected.add(item.filePath);
@@ -64,10 +71,10 @@ class ContextSelectionModal extends Modal {
     const icon = header.createDiv({ cls: "ai-second-brain-modal-icon" });
     setIcon(icon, "scan-search");
     const heading = header.createDiv({ cls: "ai-second-brain-modal-heading" });
-    heading.createEl("h2", { text: "确认本轮上下文" });
+    heading.createEl("h2", { text: "确认对话上下文" });
     heading.createEl("p", {
       cls: "ai-second-brain-muted",
-      text: `${this.options.scopeName} · 只会发送勾选文件中的相关片段`
+      text: `${this.options.scopeName} · 确认后持续使用，范围变化时再次询问`
     });
 
     const toolbar = contentEl.createDiv({ cls: "ai-second-brain-context-review-toolbar" });

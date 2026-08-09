@@ -12,8 +12,11 @@ import { confirmContextSelection } from "../context/context-selection-modal";
 import { configureChatSession } from "./chat-session-modal";
 import { ContextScope } from "../context/scope-types";
 import { pickContextSource } from "../context/context-source-picker-modal";
+import { enhanceMermaidArtifacts, extractMermaidSources } from "../ui/mermaid-artifact";
+import { buildFolderAnalysisInstruction, detectFolderAnalysisIntent } from "./folder-analysis";
 
 export const AI_CHAT_VIEW_TYPE = "ai-second-brain-chat-view";
+const COLLAPSED_CITATION_COUNT = 3;
 
 export class AIChatView extends ItemView {
   private messagesEl?: HTMLElement;
@@ -34,7 +37,12 @@ export class AIChatView extends ItemView {
   private isPreparingContext = false;
   private abortController?: AbortController;
   private expandedCitationKeys = new Set<string>();
+  private expandedCitationListKeys = new Set<string>();
   private messageRenderComponents: Component[] = [];
+  private streamingRenderComponent?: Component;
+  private streamingRenderTimer?: number;
+  private pendingStreamingMessage?: ViewChatMessage;
+  private streamingRenderVersion = 0;
   private sessionDrafts = new Map<string, string>();
 
   constructor(leaf: WorkspaceLeaf, private readonly plugin: ObsidianAIPlugin) {
@@ -162,12 +170,23 @@ export class AIChatView extends ItemView {
       this.abortController?.abort();
     });
 
-    this.inputEl.addEventListener("keydown", (event) => {
-      if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+    const ownerWindow = this.containerEl.ownerDocument.defaultView;
+    const handleComposerShortcut = (event: KeyboardEvent): void => {
+      if (
+        event.target === this.inputEl &&
+        !event.isComposing &&
+        (event.key === "Enter" || event.code === "Enter") &&
+        (event.ctrlKey || event.metaKey)
+      ) {
         event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation();
         void this.submit();
       }
-    });
+    };
+    if (ownerWindow) {
+      this.registerDomEvent(ownerWindow, "keydown", handleComposerShortcut, { capture: true });
+    }
     this.renderPendingSelectionReferences();
   }
 
@@ -208,28 +227,68 @@ export class AIChatView extends ItemView {
     const session = this.plugin.getActiveChatSession();
     const selectionReferences = this.plugin.getPendingSelectionReferences(session.id);
     const requestContent = appendSelectionReferences(content, selectionReferences);
+    const baseContextScope = this.plugin.getChatSessionContextScope(session);
+    const folderIntent = detectFolderAnalysisIntent(this.app, content);
+    const requestContextScope: ContextScope | undefined = folderIntent
+      ? {
+          id: `folder-analysis-${folderIntent.folderPaths.join("|")}`,
+          name: folderIntent.scopeName,
+          mode: "files",
+          files: folderIntent.files.map((file) => file.path),
+          folders: [],
+          tags: [],
+          pathRules: [],
+          excludeRules: [],
+          allowCloudModels: baseContextScope?.allowCloudModels ?? true
+        }
+      : baseContextScope;
     let contextFilePaths: string[] | undefined;
+    let systemInstruction = session.purpose;
 
-    if (session.autoContext) {
-      this.setPreparingContext(true);
-
+    if (session.autoContext || folderIntent) {
       try {
-        const scope = this.plugin.getChatSessionContextScope(session);
+        const scope = requestContextScope;
         const files = this.plugin.contextScopeResolver.resolve(scope);
-        const relevantFiles = await this.plugin.textSearchService.rankFiles(content, files, 6);
-        const result = await confirmContextSelection(this.app, {
-          scopeName: scope?.name || "当前授权范围",
-          files,
-          relevantFiles,
-          lockedFilePaths: session.lockedFilePaths
-        });
+        const fingerprint = createContextFingerprint(session, scope, files);
+        const availablePaths = new Set(files.map((file) => file.path));
+        const canReuseConfirmation =
+          fingerprint === session.lastContextFingerprint &&
+          session.lastContextFilePaths.length > 0 &&
+          session.lastContextFilePaths.every((path) => availablePaths.has(path));
 
-        if (!result) {
-          return;
+        if (canReuseConfirmation) {
+          contextFilePaths = session.lastContextFilePaths;
+        } else {
+          this.setPreparingContext(true);
+          const relevantFiles = await this.plugin.textSearchService.rankFiles(content, files, 6);
+          const result = await confirmContextSelection(this.app, {
+            scopeName: scope?.name || "当前授权范围",
+            files,
+            relevantFiles,
+            lockedFilePaths: session.lockedFilePaths,
+            selectAllByDefault: Boolean(folderIntent)
+          });
+
+          if (!result) {
+            return;
+          }
+
+          contextFilePaths = result.selectedFilePaths;
+          const persistentLockedPaths = folderIntent ? session.lockedFilePaths : result.lockedFilePaths;
+          await this.plugin.saveChatSessionContext(
+            session.id,
+            result.selectedFilePaths,
+            persistentLockedPaths,
+            createContextFingerprint(session, scope, files, persistentLockedPaths)
+          );
         }
 
-        contextFilePaths = result.selectedFilePaths;
-        await this.plugin.saveChatSessionContext(session.id, result.selectedFilePaths, result.lockedFilePaths);
+        if (folderIntent && contextFilePaths) {
+          const selectedPaths = new Set(contextFilePaths);
+          const selectedFiles = folderIntent.files.filter((file) => selectedPaths.has(file.path));
+          const report = await this.plugin.knowledgeAnalysisService.analyze(folderIntent.scopeName, selectedFiles);
+          systemInstruction = [session.purpose, buildFolderAnalysisInstruction(report)].filter(Boolean).join("\n\n");
+        }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         new Notice(`准备上下文失败：${message}`);
@@ -269,10 +328,11 @@ export class AIChatView extends ItemView {
         retrievalQuery: content,
         history,
         contextScopeId: session.contextScopeId,
-        contextScope: this.plugin.getChatSessionContextScope(session),
+        contextScope: requestContextScope,
         contextFilePaths,
         lockedFilePaths: session.lockedFilePaths,
-        systemInstruction: session.purpose
+        ensureFileCoverage: Boolean(folderIntent),
+        systemInstruction
       });
       assistantMessage.citations = response.citations;
 
@@ -282,7 +342,7 @@ export class AIChatView extends ItemView {
         }
 
         assistantMessage.content += delta;
-        this.updateLastMessageContent(assistantMessage);
+        this.scheduleLastMessageContentUpdate(assistantMessage);
       }
 
       if (!assistantMessage.content) {
@@ -350,23 +410,40 @@ export class AIChatView extends ItemView {
       this.renderMessageContent(contentEl, message);
 
       if (message.citations && message.citations.length > 0) {
-        this.renderCitations(item, message.citations);
+        this.renderCitations(item, message.citations, this.getCitationListKey(message));
       }
 
-      if (
-        message.role === "assistant" &&
-        message.content.trim() &&
-        message.isComplete &&
-        message.status === "complete"
-      ) {
-        this.renderAssistantActions(group, message);
+      if (message.role === "assistant" && message.content.trim() && message.isComplete) {
+        this.renderAssistantActions(group, message, message.status === "complete");
       }
     }
 
     this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
   }
 
-  private updateLastMessageContent(message: ViewChatMessage): void {
+  private scheduleLastMessageContentUpdate(message: ViewChatMessage): void {
+    this.pendingStreamingMessage = message;
+    if (this.streamingRenderTimer !== undefined) {
+      return;
+    }
+
+    const ownerWindow = this.containerEl.ownerDocument.defaultView;
+    if (!ownerWindow) {
+      return;
+    }
+
+    const renderDelay = message.content.length > 12000 ? 180 : message.content.length > 4000 ? 110 : 60;
+    this.streamingRenderTimer = ownerWindow.setTimeout(() => {
+      this.streamingRenderTimer = undefined;
+      const pending = this.pendingStreamingMessage;
+      this.pendingStreamingMessage = undefined;
+      if (pending) {
+        void this.updateLastMessageContent(pending);
+      }
+    }, renderDelay);
+  }
+
+  private async updateLastMessageContent(message: ViewChatMessage): Promise<void> {
     if (!this.messagesEl) {
       return;
     }
@@ -392,19 +469,43 @@ export class AIChatView extends ItemView {
       return;
     }
 
-    contentEl.empty();
-
     if (!message.content.trim() && !message.isComplete) {
+      contentEl.empty();
       this.renderThinkingState(contentEl);
-    } else {
-      contentEl.setText(message.content);
-
-      if (!message.isComplete) {
-        contentEl.createSpan({ cls: "ai-second-brain-stream-cursor" });
-      }
+      return;
     }
 
-    this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
+    const shouldFollowOutput = isNearScrollBottom(this.messagesEl);
+    const renderVersion = ++this.streamingRenderVersion;
+    const stagingEl = contentEl.ownerDocument.createElement("div");
+    stagingEl.className = "ai-second-brain-chat-render-staging";
+    const renderComponent = this.addChild(new Component());
+    const sourcePath = this.plugin.getEditableMarkdownView()?.file?.path || "";
+    await MarkdownRenderer.render(this.app, message.content, stagingEl, sourcePath, renderComponent);
+    enhanceMermaidArtifacts(stagingEl, extractMermaidSources(message.content));
+    this.enhanceInlineCitations(stagingEl, message.citations || []);
+
+    if (renderVersion !== this.streamingRenderVersion || !contentEl.isConnected) {
+      this.removeChild(renderComponent);
+      return;
+    }
+
+    if (this.streamingRenderComponent) {
+      this.removeChild(this.streamingRenderComponent);
+    }
+    this.streamingRenderComponent = renderComponent;
+    contentEl.empty();
+    contentEl.addClass("is-rendered-markdown");
+    while (stagingEl.firstChild) {
+      contentEl.appendChild(stagingEl.firstChild);
+    }
+    if (!message.isComplete) {
+      contentEl.createSpan({ cls: "ai-second-brain-stream-cursor" });
+    }
+
+    if (shouldFollowOutput && this.messagesEl) {
+      this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
+    }
   }
 
   private renderEmptyState(container: HTMLElement): void {
@@ -448,12 +549,17 @@ export class AIChatView extends ItemView {
   }
 
   private renderMessageContent(container: HTMLElement, message: ViewChatMessage): void {
-    if (message.role === "assistant" && message.isComplete && message.status === "complete") {
+    if (message.role === "assistant" && message.isComplete && message.content.trim()) {
       container.addClass("is-rendered-markdown");
       const sourcePath = this.plugin.getEditableMarkdownView()?.file?.path || "";
       const renderComponent = this.addChild(new Component());
       this.messageRenderComponents.push(renderComponent);
-      void MarkdownRenderer.render(this.app, message.content, container, sourcePath, renderComponent);
+      void MarkdownRenderer.render(this.app, message.content, container, sourcePath, renderComponent).then(() => {
+        if (container.isConnected) {
+          enhanceMermaidArtifacts(container, extractMermaidSources(message.content));
+          this.enhanceInlineCitations(container, message.citations || []);
+        }
+      });
       return;
     }
 
@@ -469,13 +575,21 @@ export class AIChatView extends ItemView {
     }
   }
 
-  private renderAssistantActions(container: HTMLElement, message: ViewChatMessage): void {
+  private renderAssistantActions(
+    container: HTMLElement,
+    message: ViewChatMessage,
+    includeWriteActions: boolean
+  ): void {
     const actions = container.createDiv({ cls: "ai-second-brain-message-actions" });
 
     const copyButton = createIconButton(actions, "copy", "复制");
     copyButton.addEventListener("click", () => {
       void this.copyMessage(message.content);
     });
+
+    if (!includeWriteActions) {
+      return;
+    }
 
     const diagramButton = createIconButton(actions, "workflow", "生成图谱");
     diagramButton.addEventListener("click", () => {
@@ -506,14 +620,20 @@ export class AIChatView extends ItemView {
     });
   }
 
-  private renderCitations(container: HTMLElement, citations: Citation[]): void {
+  private renderCitations(container: HTMLElement, citations: Citation[], listKey: string): void {
     const citationsEl = container.createDiv({ cls: "ai-second-brain-citations" });
-    citationsEl.createDiv({ cls: "ai-second-brain-citations-title", text: "引用来源" });
+    const title = citationsEl.createDiv({ cls: "ai-second-brain-citations-title" });
+    title.createSpan({ text: "引用来源" });
+    title.createSpan({ cls: "ai-second-brain-citations-count", text: String(citations.length) });
+    const isListExpanded = this.expandedCitationListKeys.has(listKey);
+    const citationItems: HTMLElement[] = [];
 
-    for (const citation of citations) {
+    for (const [index, citation] of citations.entries()) {
       const citationKey = this.getCitationKey(citation);
       const isExpanded = this.expandedCitationKeys.has(citationKey);
       const item = citationsEl.createDiv({ cls: "ai-second-brain-citation" });
+      citationItems.push(item);
+      item.toggleClass("is-list-hidden", !isListExpanded && index >= COLLAPSED_CITATION_COUNT);
       item.toggleClass("is-expanded", isExpanded);
 
       const summary = item.createEl("button", {
@@ -531,31 +651,173 @@ export class AIChatView extends ItemView {
       summary.title = `${citation.filePath} · ${citation.startLine}-${citation.endLine}`;
       summary.setAttribute("aria-expanded", String(isExpanded));
       summary.addEventListener("click", () => {
+        const scrollTop = this.messagesEl?.scrollTop;
         if (this.expandedCitationKeys.has(citationKey)) {
           this.expandedCitationKeys.delete(citationKey);
         } else {
           this.expandedCitationKeys.add(citationKey);
         }
-
-        this.renderMessages();
+        const expanded = this.expandedCitationKeys.has(citationKey);
+        item.toggleClass("is-expanded", expanded);
+        summary.setAttribute("aria-expanded", String(expanded));
+        setIcon(toggleIcon, expanded ? "chevron-up" : "chevron-down");
+        item.querySelector(".ai-second-brain-citation-detail")?.remove();
+        if (expanded) {
+          this.renderCitationDetail(item, citation);
+        }
+        if (this.messagesEl && scrollTop !== undefined) {
+          this.messagesEl.scrollTop = scrollTop;
+        }
       });
 
-      if (!isExpanded) {
-        continue;
+      if (isExpanded) {
+        this.renderCitationDetail(item, citation);
       }
+    }
 
-      const detail = item.createDiv({ cls: "ai-second-brain-citation-detail" });
-      detail.createDiv({ cls: "ai-second-brain-citation-path", text: citation.filePath });
-      detail.createDiv({ cls: "ai-second-brain-citation-excerpt", text: citation.excerpt });
-      const openButton = createIconButton(detail, "external-link", "打开来源", "ai-second-brain-citation-open");
-      openButton.addEventListener("click", () => {
-        void this.openCitation(citation);
+    if (citations.length > COLLAPSED_CITATION_COUNT) {
+      const hiddenCount = citations.length - COLLAPSED_CITATION_COUNT;
+      const toggle = citationsEl.createEl("button", {
+        cls: "ai-second-brain-citations-more",
+        attr: { type: "button", "aria-expanded": String(isListExpanded) }
+      });
+      const label = toggle.createSpan();
+      const icon = toggle.createSpan({ cls: "ai-second-brain-citations-more-icon" });
+      const updateToggle = (expanded: boolean): void => {
+        label.setText(expanded ? "收起引用" : `再显示 ${hiddenCount} 个文件`);
+        setIcon(icon, expanded ? "chevron-up" : "chevron-down");
+        toggle.setAttribute("aria-expanded", String(expanded));
+      };
+      updateToggle(isListExpanded);
+      toggle.addEventListener("click", () => {
+        const scrollTop = this.messagesEl?.scrollTop;
+        const expanded = !this.expandedCitationListKeys.has(listKey);
+        if (expanded) {
+          this.expandedCitationListKeys.add(listKey);
+        } else {
+          this.expandedCitationListKeys.delete(listKey);
+        }
+        citationItems.forEach((item, index) => {
+          item.toggleClass("is-list-hidden", !expanded && index >= COLLAPSED_CITATION_COUNT);
+        });
+        updateToggle(expanded);
+        if (this.messagesEl && scrollTop !== undefined) {
+          this.messagesEl.scrollTop = scrollTop;
+        }
       });
     }
   }
 
+  private renderCitationDetail(container: HTMLElement, citation: Citation): void {
+    const detail = container.createDiv({ cls: "ai-second-brain-citation-detail" });
+    detail.createDiv({ cls: "ai-second-brain-citation-path", text: citation.filePath });
+    detail.createDiv({ cls: "ai-second-brain-citation-excerpt", text: citation.excerpt });
+    const openButton = createIconButton(detail, "external-link", "打开来源", "ai-second-brain-citation-open");
+    openButton.addEventListener("click", () => {
+      void this.openCitation(citation);
+    });
+  }
+
+  private enhanceInlineCitations(container: HTMLElement, citations: Citation[]): void {
+    if (citations.length === 0) {
+      return;
+    }
+
+    const ownerDocument = container.ownerDocument;
+    const walker = ownerDocument.createTreeWalker(container, 4);
+    const textNodes: Text[] = [];
+    let node = walker.nextNode();
+    while (node) {
+      const textNode = node as Text;
+      const parent = textNode.parentElement;
+      if (
+        parent &&
+        /\[\d+\]/.test(textNode.data) &&
+        !parent.closest("a, button, code, pre, .ai-second-brain-mermaid-artifact, .ai-second-brain-inline-citation")
+      ) {
+        textNodes.push(textNode);
+      }
+      node = walker.nextNode();
+    }
+
+    for (const textNode of textNodes) {
+      const fragment = ownerDocument.createDocumentFragment();
+      const pattern = /\[(\d+)\]/g;
+      let cursor = 0;
+      let match: RegExpExecArray | null;
+      let changed = false;
+
+      while ((match = pattern.exec(textNode.data)) !== null) {
+        const citation = citations[Number(match[1]) - 1];
+        if (!citation) {
+          continue;
+        }
+        changed = true;
+        fragment.append(textNode.data.slice(cursor, match.index));
+        fragment.appendChild(this.createInlineCitation(ownerDocument, citation, Number(match[1])));
+        cursor = match.index + match[0].length;
+      }
+
+      if (changed) {
+        fragment.append(textNode.data.slice(cursor));
+        textNode.replaceWith(fragment);
+      }
+    }
+  }
+
+  private createInlineCitation(ownerDocument: Document, citation: Citation, index: number): HTMLButtonElement {
+    const button = ownerDocument.createElement("button");
+    button.type = "button";
+    button.className = "ai-second-brain-inline-citation";
+    button.textContent = String(index);
+    button.setAttribute("aria-label", `查看引用 ${index}：${citation.title}`);
+
+    const preview = ownerDocument.createElement("span");
+    preview.className = "ai-second-brain-inline-citation-preview";
+    const title = ownerDocument.createElement("span");
+    title.className = "ai-second-brain-inline-citation-preview-title";
+    title.textContent = `${citation.title} · ${citation.startLine}-${citation.endLine}`;
+    preview.appendChild(title);
+    const path = ownerDocument.createElement("span");
+    path.className = "ai-second-brain-inline-citation-preview-path";
+    path.textContent = citation.filePath;
+    preview.appendChild(path);
+    const excerpt = ownerDocument.createElement("span");
+    excerpt.className = "ai-second-brain-inline-citation-preview-excerpt";
+    excerpt.textContent = citation.excerpt;
+    preview.appendChild(excerpt);
+    button.appendChild(preview);
+    const positionPreview = (): void => {
+      const viewport = ownerDocument.defaultView;
+      if (!viewport) {
+        return;
+      }
+      const anchor = button.getBoundingClientRect();
+      const gap = 8;
+      const width = Math.min(320, viewport.innerWidth - 20);
+      preview.style.width = `${width}px`;
+      preview.style.left = `${Math.max(10, Math.min(anchor.left + anchor.width / 2 - width / 2, viewport.innerWidth - width - 10))}px`;
+      const previewHeight = Math.min(preview.scrollHeight, 240);
+      const fitsAbove = anchor.top >= previewHeight + gap + 10;
+      preview.style.top = fitsAbove
+        ? `${anchor.top - previewHeight - gap}px`
+        : `${anchor.bottom + gap}px`;
+      preview.toggleClass("is-below", !fitsAbove);
+    };
+    button.addEventListener("pointerenter", positionPreview);
+    button.addEventListener("focus", positionPreview);
+    button.addEventListener("click", () => {
+      void this.openCitation(citation);
+    });
+    return button;
+  }
+
   private getCitationKey(citation: Citation): string {
     return `${citation.filePath}:${citation.startLine}-${citation.endLine}`;
+  }
+
+  private getCitationListKey(message: ViewChatMessage): string {
+    return message.createdAt || `${message.citations?.[0]?.filePath || "citation"}:${message.content.length}`;
   }
 
 
@@ -691,6 +953,7 @@ export class AIChatView extends ItemView {
     this.activeSessionId = session.id;
     this.messages = [];
     this.expandedCitationKeys.clear();
+    this.expandedCitationListKeys.clear();
     this.refreshSessionControls();
     this.refreshScopeControls();
     this.renderMessages();
@@ -744,6 +1007,7 @@ export class AIChatView extends ItemView {
     this.activeSessionId = session.id;
     this.messages = session.messages.map(toViewMessage);
     this.expandedCitationKeys.clear();
+    this.expandedCitationListKeys.clear();
     this.refreshSessionControls();
     this.refreshScopeControls();
     this.renderMessages();
@@ -755,6 +1019,7 @@ export class AIChatView extends ItemView {
     this.abortController?.abort();
     this.messages = [];
     this.expandedCitationKeys.clear();
+    this.expandedCitationListKeys.clear();
     this.renderMessages();
     await this.plugin.saveChatSessionMessages(this.activeSessionId, []);
     this.refreshSessionControls();
@@ -875,6 +1140,18 @@ export class AIChatView extends ItemView {
   }
 
   private clearMessageRenderComponents(): void {
+    const ownerWindow = this.containerEl.ownerDocument.defaultView;
+    if (this.streamingRenderTimer !== undefined && ownerWindow) {
+      ownerWindow.clearTimeout(this.streamingRenderTimer);
+    }
+    this.streamingRenderTimer = undefined;
+    this.pendingStreamingMessage = undefined;
+    this.streamingRenderVersion += 1;
+    if (this.streamingRenderComponent) {
+      this.removeChild(this.streamingRenderComponent);
+      this.streamingRenderComponent = undefined;
+    }
+
     for (const component of this.messageRenderComponents) {
       this.removeChild(component);
     }
@@ -896,35 +1173,60 @@ export class AIChatView extends ItemView {
     }
 
     const header = this.selectionReferencesEl.createDiv({ cls: "ai-second-brain-composer-references-header" });
-    header.createSpan({ text: `对话引用 · ${references.length}` });
+    const headerLabel = header.createDiv({ cls: "ai-second-brain-composer-references-title" });
+    const headerIcon = headerLabel.createSpan({ cls: "ai-second-brain-composer-references-title-icon" });
+    setIcon(headerIcon, "text-quote");
+    headerLabel.createSpan({ text: "对话引用" });
+    headerLabel.createSpan({
+      cls: "ai-second-brain-composer-references-count",
+      text: String(references.length)
+    });
     const clearButton = createIconButton(header, "x", "清空全部引用", "ai-second-brain-composer-references-clear");
     clearButton.addEventListener("click", () => {
       this.plugin.clearPendingSelectionReferences(this.activeSessionId);
     });
 
     const list = this.selectionReferencesEl.createDiv({ cls: "ai-second-brain-composer-reference-list" });
-    for (const reference of references) {
-      const chip = list.createDiv({ cls: "ai-second-brain-composer-reference" });
-      const openButton = chip.createEl("button", {
-        cls: "ai-second-brain-composer-reference-open",
-        attr: {
-          type: "button",
-          title: reference.text
-        }
+    const groups = groupSelectionReferences(references);
+    for (const group of groups) {
+      const groupEl = list.createDiv({ cls: "ai-second-brain-composer-reference-group" });
+      const groupHeader = groupEl.createDiv({ cls: "ai-second-brain-composer-reference-group-header" });
+      const fileIcon = groupHeader.createSpan({ cls: "ai-second-brain-composer-reference-file-icon" });
+      setIcon(fileIcon, "file-text");
+      groupHeader.createSpan({
+        cls: "ai-second-brain-composer-reference-file-name",
+        text: group.fileName
       });
-      const icon = openButton.createSpan({ cls: "ai-second-brain-composer-reference-icon" });
-      setIcon(icon, "text-quote");
-      openButton.createSpan({
-        cls: "ai-second-brain-composer-reference-label",
-        text: `${reference.fileName} · ${formatLineRange(reference)}`
+      groupHeader.createSpan({
+        cls: "ai-second-brain-composer-reference-file-count",
+        text: `${group.references.length} 处`
       });
-      openButton.addEventListener("click", () => {
-        void this.openSelectionReference(reference);
-      });
-      const removeButton = createIconButton(chip, "x", "移除此引用", "ai-second-brain-composer-reference-remove");
-      removeButton.addEventListener("click", () => {
-        this.plugin.removePendingSelectionReference(this.activeSessionId, reference.id);
-      });
+
+      for (const reference of group.references) {
+        const row = groupEl.createDiv({ cls: "ai-second-brain-composer-reference" });
+        const openButton = row.createEl("button", {
+          cls: "ai-second-brain-composer-reference-open",
+          attr: {
+            type: "button",
+            title: reference.text
+          }
+        });
+        openButton.createSpan({
+          cls: "ai-second-brain-composer-reference-line",
+          text: formatLineRange(reference)
+        });
+        openButton.createSpan({
+          cls: "ai-second-brain-composer-reference-excerpt",
+          text: compactReferenceText(reference.text)
+        });
+        openButton.addEventListener("click", () => {
+          void this.openSelectionReference(reference);
+        });
+        const removeButton = createIconButton(row, "x", "移除此引用", "ai-second-brain-composer-reference-remove");
+        removeButton.addEventListener("click", () => {
+          this.plugin.removePendingSelectionReference(this.activeSessionId, reference.id);
+        });
+      }
     }
   }
 
@@ -1113,6 +1415,32 @@ function formatLineRange(reference: SelectionReference): string {
   return start === end ? `第 ${start} 行` : `第 ${start}–${end} 行`;
 }
 
+function groupSelectionReferences(
+  references: SelectionReference[]
+): Array<{ filePath: string; fileName: string; references: SelectionReference[] }> {
+  const groups = new Map<string, { filePath: string; fileName: string; references: SelectionReference[] }>();
+
+  for (const reference of references) {
+    const group = groups.get(reference.filePath);
+    if (group) {
+      group.references.push(reference);
+    } else {
+      groups.set(reference.filePath, {
+        filePath: reference.filePath,
+        fileName: reference.fileName,
+        references: [reference]
+      });
+    }
+  }
+
+  return Array.from(groups.values());
+}
+
+function compactReferenceText(text: string): string {
+  const compact = text.replace(/\s+/g, " ").trim();
+  return compact.length > 52 ? `${compact.slice(0, 52)}…` : compact;
+}
+
 function contextModeLabel(mode: ChatContextMode): string {
   if (mode === "follow") {
     return "跟随当前文件";
@@ -1131,4 +1459,29 @@ function getContextModeIcon(mode: ChatContextMode, scope: ContextScope | undefin
     return "lock-keyhole";
   }
   return getScopeIcon(scope);
+}
+
+function isNearScrollBottom(container: HTMLElement): boolean {
+  return container.scrollHeight - container.scrollTop - container.clientHeight < 72;
+}
+
+function createContextFingerprint(
+  session: StoredChatSession,
+  scope: ContextScope | undefined,
+  files: TFile[],
+  lockedFilePaths: string[] = session.lockedFilePaths
+): string {
+  const signature = [
+    session.contextMode,
+    scope?.id || "no-scope",
+    ...files.map((file) => file.path).sort(),
+    "--locked--",
+    ...lockedFilePaths.slice().sort()
+  ].join("\n");
+  let hash = 2166136261;
+  for (let index = 0; index < signature.length; index += 1) {
+    hash ^= signature.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `context-v1-${(hash >>> 0).toString(36)}-${files.length}-${lockedFilePaths.length}`;
 }
