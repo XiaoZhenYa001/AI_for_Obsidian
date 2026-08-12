@@ -1,8 +1,9 @@
-import { App, Component, FuzzySuggestModal, ItemView, MarkdownRenderer, MarkdownView, Menu, Notice, setIcon, TFile, WorkspaceLeaf } from "obsidian";
+import { Component, ItemView, MarkdownRenderer, MarkdownView, Menu, Notice, setIcon, TFile, WorkspaceLeaf } from "obsidian";
 import type ObsidianAIPlugin from "../main";
 import { isAbortError } from "../providers/errors";
 import { ChatMessage } from "../providers/types";
 import { Citation } from "../retrieval/types";
+import { createCitationFingerprint } from "../retrieval/citations";
 import { DiffPreviewModal } from "../ui/diff-preview-modal";
 import { createIconButton } from "../ui/icon-button";
 import { ChatContextMode, SelectionReference, StoredChatMessage, StoredChatSession, ViewChatMessage } from "./types";
@@ -14,6 +15,9 @@ import { ContextScope } from "../context/scope-types";
 import { pickContextSource } from "../context/context-source-picker-modal";
 import { enhanceMermaidArtifacts, extractMermaidSources } from "../ui/mermaid-artifact";
 import { buildFolderAnalysisInstruction, detectFolderAnalysisIntent } from "./folder-analysis";
+import { ModificationPlanModal } from "../modifications/modification-plan-modal";
+import { ChatSessionManagerModal } from "./chat-session-manager-modal";
+import { normalizeMermaidMarkdown } from "../utils/mermaid";
 
 export const AI_CHAT_VIEW_TYPE = "ai-second-brain-chat-view";
 const COLLAPSED_CITATION_COUNT = 3;
@@ -38,6 +42,7 @@ export class AIChatView extends ItemView {
   private abortController?: AbortController;
   private expandedCitationKeys = new Set<string>();
   private expandedCitationListKeys = new Set<string>();
+  private citationFreshnessCache = new Map<string, boolean>();
   private messageRenderComponents: Component[] = [];
   private streamingRenderComponent?: Component;
   private streamingRenderTimer?: number;
@@ -213,6 +218,26 @@ export class AIChatView extends ItemView {
     this.renderPendingSelectionReferences();
   }
 
+  handleFileRename(oldPath: string, newPath: string): void {
+    let changed = false;
+    for (const message of this.messages) {
+      for (const citation of message.citations || []) {
+        if (citation.filePath === oldPath) {
+          citation.filePath = newPath;
+          changed = true;
+        }
+      }
+      for (const reference of message.selectionReferences || []) {
+        if (reference.filePath === oldPath) {
+          reference.filePath = newPath;
+          reference.fileName = newPath.split("/").pop() || newPath;
+          changed = true;
+        }
+      }
+    }
+    if (changed) this.renderMessages();
+  }
+
   private async submit(): Promise<void> {
     if (this.isGenerating || this.isPreparingContext) {
       return;
@@ -364,6 +389,7 @@ export class AIChatView extends ItemView {
       assistantMessage.status = "error";
       this.renderMessages();
     } finally {
+      assistantMessage.content = normalizeMermaidMarkdown(assistantMessage.content);
       if (assistantMessage.status === "streaming") {
         assistantMessage.status = "complete";
       }
@@ -587,6 +613,12 @@ export class AIChatView extends ItemView {
       void this.copyMessage(message.content);
     });
 
+    const saveWithCitationsButton = createIconButton(actions, "notebook-tabs", "保存为带引用笔记");
+    saveWithCitationsButton.disabled = !message.citations?.length;
+    saveWithCitationsButton.addEventListener("click", () => {
+      void this.saveMessageWithCitations(message);
+    });
+
     if (!includeWriteActions) {
       return;
     }
@@ -602,6 +634,25 @@ export class AIChatView extends ItemView {
         message.content,
         message.citations
       ).open();
+    });
+
+    const planButton = createIconButton(actions, "files", "创建修改计划");
+    planButton.addEventListener("click", () => {
+      const session = this.plugin.getActiveChatSession();
+      const filePaths = Array.from(new Set([
+        ...(message.citations || []).map((citation) => citation.filePath),
+        ...session.lastContextFilePaths,
+        ...session.lockedFilePaths
+      ]));
+      if (filePaths.length === 0) {
+        const activePath = this.plugin.getEditableMarkdownView()?.file?.path;
+        if (activePath) filePaths.push(activePath);
+      }
+      if (filePaths.length === 0) {
+        new Notice("当前回答没有可用于生成修改计划的笔记来源。");
+        return;
+      }
+      new ModificationPlanModal(this.app, this.plugin, message.content, filePaths).open();
     });
 
     const insertButton = createIconButton(actions, "corner-down-left", "插入到光标");
@@ -643,6 +694,10 @@ export class AIChatView extends ItemView {
       const sourceIcon = summary.createSpan({ cls: "ai-second-brain-citation-icon" });
       setIcon(sourceIcon, "file-text");
       summary.createSpan({
+        cls: `ai-second-brain-citation-evidence is-${citation.evidenceType || "related"}`,
+        text: citation.evidenceType === "direct" ? "直接证据" : "相关资料"
+      });
+      summary.createSpan({
         cls: "ai-second-brain-citation-title",
         text: `${citation.title} · ${citation.startLine}-${citation.endLine}`
       });
@@ -669,6 +724,7 @@ export class AIChatView extends ItemView {
           this.messagesEl.scrollTop = scrollTop;
         }
       });
+      void this.updateCitationFreshness(item, citation);
 
       if (isExpanded) {
         this.renderCitationDetail(item, citation);
@@ -716,6 +772,35 @@ export class AIChatView extends ItemView {
     openButton.addEventListener("click", () => {
       void this.openCitation(citation);
     });
+  }
+
+  private async updateCitationFreshness(container: HTMLElement, citation: Citation): Promise<void> {
+    if (!citation.sourceFingerprint) return;
+    const file = this.app.vault.getAbstractFileByPath(citation.filePath);
+    if (!(file instanceof TFile)) {
+      container.addClass("is-stale");
+      container.setAttribute("data-citation-status", "来源已不存在");
+      return;
+    }
+    const cacheKey = `${citation.filePath}:${citation.startLine}-${citation.endLine}:${citation.sourceFingerprint}:${file.stat.mtime}:${file.stat.size}`;
+    const cached = this.citationFreshnessCache.get(cacheKey);
+    if (cached !== undefined) {
+      if (!cached) {
+        container.addClass("is-stale");
+        container.setAttribute("data-citation-status", "来源可能已更新");
+      }
+      return;
+    }
+    const content = await this.app.vault.cachedRead(file);
+    if (!container.isConnected) return;
+    const lines = content.split(/\r?\n/).slice(Math.max(0, citation.startLine - 1), citation.endLine);
+    const fresh = createCitationFingerprint(lines.join("\n")) === citation.sourceFingerprint;
+    if (this.citationFreshnessCache.size >= 500) this.citationFreshnessCache.clear();
+    this.citationFreshnessCache.set(cacheKey, fresh);
+    if (!fresh) {
+      container.addClass("is-stale");
+      container.setAttribute("data-citation-status", "来源可能已更新");
+    }
   }
 
   private enhanceInlineCitations(container: HTMLElement, citations: Citation[]): void {
@@ -830,7 +915,34 @@ export class AIChatView extends ItemView {
       return;
     }
 
-    await this.plugin.app.workspace.getLeaf(false).openFile(file);
+    const leaf = this.plugin.app.workspace.getLeaf(false);
+    await leaf.openFile(file);
+    if (!(leaf.view instanceof MarkdownView)) return;
+    const editor = leaf.view.editor;
+    const fromLine = Math.max(0, Math.min(citation.startLine - 1, editor.lineCount() - 1));
+    const toLine = Math.max(fromLine, Math.min(citation.endLine - 1, editor.lineCount() - 1));
+    const from = { line: fromLine, ch: 0 };
+    const to = { line: toLine, ch: editor.getLine(toLine).length };
+    editor.setSelection(from, to);
+    editor.scrollIntoView({ from, to }, true);
+    this.containerEl.ownerDocument.defaultView?.setTimeout(() => {
+      const currentFrom = editor.getCursor("from");
+      const currentTo = editor.getCursor("to");
+      if (samePosition(currentFrom, from) && samePosition(currentTo, to)) editor.setCursor(to);
+    }, 1800);
+  }
+
+  private async saveMessageWithCitations(message: ViewChatMessage): Promise<void> {
+    const citations = message.citations || [];
+    if (citations.length === 0) return;
+    const content = buildFootnotedMessage(message.content, citations);
+    try {
+      const file = await this.plugin.createGeneratedNote("AI Answer with Sources", content);
+      await this.app.workspace.getLeaf(false).openFile(file);
+      new Notice("已保存带脚注引用的 AI 回答。");
+    } catch (error) {
+      new Notice(error instanceof Error ? error.message : String(error));
+    }
   }
 
   private async openSelectionReference(reference: SelectionReference): Promise<void> {
@@ -864,7 +976,7 @@ export class AIChatView extends ItemView {
 
     const change = EditorChangeTransaction.captureInsertion(editor, view.file.path);
 
-    new DiffPreviewModal(this.app, "", content, (value) => {
+    new DiffPreviewModal(this.app, "", normalizeMermaidMarkdown(content), (value) => {
       const currentView = this.plugin.getEditableMarkdownView();
       const result = change.apply(value, currentView?.file?.path);
 
@@ -900,7 +1012,7 @@ export class AIChatView extends ItemView {
       return;
     }
 
-    new DiffPreviewModal(this.app, selection, content, (value) => {
+    new DiffPreviewModal(this.app, selection, normalizeMermaidMarkdown(content), (value) => {
       const currentView = this.plugin.getEditableMarkdownView();
       const result = change.apply(value, currentView?.file?.path);
 
@@ -915,7 +1027,7 @@ export class AIChatView extends ItemView {
 
   private async createNoteFromMessage(content: string): Promise<void> {
     try {
-      const file = await this.plugin.createGeneratedNote("AI Chat Result", content);
+      const file = await this.plugin.createGeneratedNote("AI Chat Result", normalizeMermaidMarkdown(content));
       await this.app.workspace.getLeaf(false).openFile(file);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -925,7 +1037,7 @@ export class AIChatView extends ItemView {
 
   private async copyMessage(content: string): Promise<void> {
     try {
-      await navigator.clipboard.writeText(content);
+      await navigator.clipboard.writeText(normalizeMermaidMarkdown(content));
       new Notice("已复制 AI 回复。");
     } catch {
       new Notice("复制失败，请手动选择内容复制。");
@@ -1117,12 +1229,29 @@ export class AIChatView extends ItemView {
       return;
     }
 
-    new ChatSessionSwitcherModal(
-      this.app,
-      this.plugin.settings.chatSessions,
-      this.activeSessionId,
-      (sessionId) => this.switchSession(sessionId)
-    ).open();
+    new ChatSessionManagerModal(this.app, this.plugin, {
+      onSelect: (sessionId) => this.switchSession(sessionId),
+      onDelete: (deletedIds, activeSessionId) => this.handleDeletedSessions(deletedIds, activeSessionId)
+    }).open();
+  }
+
+  private async handleDeletedSessions(deletedIds: string[], activeSessionId: string): Promise<void> {
+    for (const sessionId of deletedIds) this.sessionDrafts.delete(sessionId);
+    if (!deletedIds.includes(this.activeSessionId)) {
+      this.refreshSessionControls();
+      return;
+    }
+    const session = this.plugin.settings.chatSessions.find((item) => item.id === activeSessionId);
+    if (!session) return;
+    this.activeSessionId = session.id;
+    this.messages = session.messages.map(toViewMessage);
+    this.expandedCitationKeys.clear();
+    this.expandedCitationListKeys.clear();
+    this.refreshSessionControls();
+    this.refreshScopeControls();
+    this.renderMessages();
+    this.restoreSessionDraft();
+    this.renderPendingSelectionReferences();
   }
 
   private rememberCurrentDraft(): void {
@@ -1349,35 +1478,10 @@ function getScopeIcon(scope: ContextScope | undefined): string {
   }
 }
 
-class ChatSessionSwitcherModal extends FuzzySuggestModal<StoredChatSession> {
-  constructor(
-    app: App,
-    private readonly sessions: StoredChatSession[],
-    private readonly activeSessionId: string,
-    private readonly onSelect: (sessionId: string) => Promise<void>
-  ) {
-    super(app);
-    this.setPlaceholder("搜索并切换对话");
-  }
-
-  getItems(): StoredChatSession[] {
-    return this.sessions;
-  }
-
-  getItemText(session: StoredChatSession): string {
-    const current = session.id === this.activeSessionId ? "当前 · " : "";
-    return `${current}${session.title}`;
-  }
-
-  onChooseItem(session: StoredChatSession): void {
-    void this.onSelect(session.id);
-  }
-}
-
 function toViewMessage(message: StoredChatMessage): ViewChatMessage {
   return {
     role: message.role,
-    content: message.content,
+    content: message.role === "assistant" ? normalizeMermaidMarkdown(message.content) : message.content,
     citations: message.citations,
     selectionReferences: message.selectionReferences,
     isComplete: true,
@@ -1463,6 +1567,25 @@ function getContextModeIcon(mode: ChatContextMode, scope: ContextScope | undefin
 
 function isNearScrollBottom(container: HTMLElement): boolean {
   return container.scrollHeight - container.scrollTop - container.clientHeight < 72;
+}
+
+function samePosition(a: { line: number; ch: number }, b: { line: number; ch: number }): boolean {
+  return a.line === b.line && a.ch === b.ch;
+}
+
+function buildFootnotedMessage(content: string, citations: Citation[]): string {
+  const segments = content.split(/(```[\s\S]*?```)/g);
+  const body = segments.map((segment, index) => index % 2 === 1 ? segment : segment.replace(/\[(\d+)\]/g, (match, value) => {
+    const citationIndex = Number(value) - 1;
+    return citations[citationIndex] ? `[^${value}]` : match;
+  })).join("");
+  const footnotes = citations.map((citation, index) => {
+    const target = citation.filePath.replace(/\.md$/i, "");
+    const excerpt = citation.excerpt.replace(/\s+/g, " ").trim();
+    const evidence = citation.evidenceType === "direct" ? "直接证据" : "相关资料";
+    return `[^${index + 1}]: [[${target}|${citation.title}]]，第 ${citation.startLine}-${citation.endLine} 行，${evidence}。${excerpt}`;
+  });
+  return [`# AI 回答`, "", body.trim(), "", "## 引用来源", "", ...footnotes, ""].join("\n");
 }
 
 function createContextFingerprint(

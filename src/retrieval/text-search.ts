@@ -7,12 +7,15 @@ const SCORE_DIRECT_PHRASE = 12;
 const SCORE_PATH_MATCH = 4;
 const SCORE_HEADING_MATCH = 3;
 const SCORE_CONTENT_MAX = 5;
+const MAX_CANDIDATE_CHUNKS = 1600;
+const INDEX_BATCH_SIZE = 8;
 
 type IndexedFile = {
   path: string;
   mtime: number;
   size: number;
   chunks: NoteChunk[];
+  termChunkIds: Map<string, Set<string>>;
 };
 
 export type TextIndexStats = {
@@ -29,27 +32,31 @@ export type RelevantFile = {
 
 export class TextSearchService {
   private index = new Map<string, IndexedFile>();
+  private chunksById = new Map<string, NoteChunk>();
+  private postings = new Map<string, Set<string>>();
   private lastRebuildAt?: string;
 
   constructor(private readonly app: App) {}
 
   async rebuild(files: TFile[]): Promise<TextIndexStats> {
     this.index.clear();
+    this.chunksById.clear();
+    this.postings.clear();
 
-    for (const file of files) {
-      await this.indexFile(file);
-    }
+    await this.ensureFilesIndexed(files, true);
 
     this.lastRebuildAt = new Date().toISOString();
     return this.getStats();
   }
 
   invalidateFile(path: string): void {
-    this.index.delete(path);
+    this.removeIndexedFile(path);
   }
 
   clear(): void {
     this.index.clear();
+    this.chunksById.clear();
+    this.postings.clear();
     this.lastRebuildAt = undefined;
   }
 
@@ -72,36 +79,52 @@ export class TextSearchService {
     const directPhrase = normalize(query);
     const results: RetrievedChunk[] = [];
     const fallbackResults: RetrievedChunk[] = [];
+    const allowedPaths = new Set(files.map((file) => file.path));
 
-    for (const file of files) {
-      const indexedFile = await this.ensureIndexed(file);
-      const chunks = indexedFile.chunks;
-
-      if (files.length === 1) {
+    await this.ensureFilesIndexed(files);
+    if (files.length === 1) {
+      const indexedFile = this.index.get(files[0].path);
+      if (indexedFile) {
         fallbackResults.push(
-          ...chunks.slice(0, limit).map((chunk) => ({
+          ...indexedFile.chunks.slice(0, limit).map((chunk) => ({
             ...chunk,
             score: 0.1
           }))
         );
       }
+    }
 
-      for (const chunk of chunks) {
-        const score = scoreChunk(
-          chunk.filePath,
-          chunk.heading || "",
-          chunk.content,
-          chunk.semanticContext || "",
-          terms,
-          directPhrase
-        );
+    const candidateHits = new Map<string, number>();
+    for (const term of terms) {
+      for (const chunkId of this.postings.get(term) || []) {
+        candidateHits.set(chunkId, (candidateHits.get(chunkId) || 0) + 1);
+      }
+    }
 
-        if (score > 0) {
-          results.push({
-            ...chunk,
-            score
-          });
-        }
+    const candidateIds = Array.from(candidateHits.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, MAX_CANDIDATE_CHUNKS)
+      .map(([chunkId]) => chunkId);
+    for (const chunkId of candidateIds) {
+      const chunk = this.chunksById.get(chunkId);
+      if (!chunk || !allowedPaths.has(chunk.filePath)) {
+        continue;
+      }
+
+      const score = scoreChunk(
+        chunk.filePath,
+        chunk.heading || "",
+        chunk.content,
+        chunk.semanticContext || "",
+        terms,
+        directPhrase
+      );
+
+      if (score > 0) {
+        results.push({
+          ...chunk,
+          score
+        });
       }
     }
 
@@ -138,9 +161,11 @@ export class TextSearchService {
 
   async getRepresentativeChunks(files: TFile[], limitPerFile = 1): Promise<RetrievedChunk[]> {
     const results: RetrievedChunk[] = [];
+    await this.ensureFilesIndexed(files);
 
     for (const file of files) {
-      const indexedFile = await this.ensureIndexed(file);
+      const indexedFile = this.index.get(file.path);
+      if (!indexedFile) continue;
       results.push(
         ...indexedFile.chunks.slice(0, limitPerFile).map((chunk) => ({
           ...chunk,
@@ -162,18 +187,55 @@ export class TextSearchService {
     return this.indexFile(file);
   }
 
+  private async ensureFilesIndexed(files: TFile[], force = false): Promise<void> {
+    for (let index = 0; index < files.length; index += INDEX_BATCH_SIZE) {
+      const batch = files.slice(index, index + INDEX_BATCH_SIZE);
+      await Promise.all(batch.map((file) => force ? this.indexFile(file) : this.ensureIndexed(file)));
+    }
+  }
+
   private async indexFile(file: TFile): Promise<IndexedFile> {
+    this.removeIndexedFile(file.path);
     const rawContent = await this.app.vault.cachedRead(file);
     const prepared = prepareContextDocument(file.path, rawContent, this.getIncomingLinks(file.path));
+    const chunks = chunkMarkdown(file.path, prepared.content, undefined, prepared.semanticContext);
+    const termChunkIds = new Map<string, Set<string>>();
+    for (const chunk of chunks) {
+      this.chunksById.set(chunk.id, chunk);
+      for (const term of extractIndexTerms(`${chunk.filePath}\n${chunk.heading || ""}\n${chunk.semanticContext || ""}\n${chunk.content}`)) {
+        const ids = this.postings.get(term) || new Set<string>();
+        ids.add(chunk.id);
+        this.postings.set(term, ids);
+        const fileIds = termChunkIds.get(term) || new Set<string>();
+        fileIds.add(chunk.id);
+        termChunkIds.set(term, fileIds);
+      }
+    }
     const indexedFile: IndexedFile = {
       path: file.path,
       mtime: file.stat.mtime,
       size: file.stat.size,
-      chunks: chunkMarkdown(file.path, prepared.content, undefined, prepared.semanticContext)
+      chunks,
+      termChunkIds
     };
 
     this.index.set(file.path, indexedFile);
     return indexedFile;
+  }
+
+  private removeIndexedFile(path: string): void {
+    const existing = this.index.get(path);
+    if (!existing) {
+      return;
+    }
+    for (const [term, fileChunkIds] of existing.termChunkIds) {
+      const ids = this.postings.get(term);
+      if (!ids) continue;
+      for (const chunkId of fileChunkIds) ids.delete(chunkId);
+      if (ids.size === 0) this.postings.delete(term);
+    }
+    for (const chunk of existing.chunks) this.chunksById.delete(chunk.id);
+    this.index.delete(path);
   }
 
   private getIncomingLinks(filePath: string): string[] {
@@ -236,19 +298,34 @@ function extractTerms(value: string): string[] {
   for (const block of cjkBlocks) {
     if (block.length <= 4) {
       terms.add(block);
-      continue;
     }
 
     for (let index = 0; index < block.length - 1; index += 1) {
       terms.add(block.slice(index, index + 2));
     }
 
-    for (let index = 0; index < block.length - 2; index += 1) {
-      terms.add(block.slice(index, index + 3));
+    if (block.length > 4) {
+      for (let index = 0; index < block.length - 2; index += 1) {
+        terms.add(block.slice(index, index + 3));
+      }
     }
   }
 
   return Array.from(terms).filter((term) => term.length > 1);
+}
+
+function extractIndexTerms(value: string): Set<string> {
+  const normalized = normalize(value);
+  const terms = new Set<string>(normalized.match(/[a-z0-9_#/-]{2,}/g) || []);
+  const cjkBlocks = normalized.match(/[\u3400-\u9fff\u{20000}-\u{2A6DF}\u3040-\u309F\u30A0-\u30FF]+/gu) || [];
+  for (const block of cjkBlocks) {
+    if (block.length === 1) continue;
+    if (block.length <= 4) terms.add(block);
+    for (let index = 0; index < block.length - 1; index += 1) {
+      terms.add(block.slice(index, index + 2));
+    }
+  }
+  return terms;
 }
 
 function countOccurrences(value: string, term: string): number {

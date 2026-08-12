@@ -1,6 +1,8 @@
 import { App, Component, Editor, MarkdownRenderer, Modal, Notice, setIcon, Setting } from "obsidian";
 import type ObsidianAIPlugin from "../main";
 import { Citation } from "../retrieval/types";
+import { enhanceMermaidArtifacts, extractMermaidSources } from "../ui/mermaid-artifact";
+import { normalizeMermaidMarkdown } from "../utils/mermaid";
 import { createIconButton } from "../ui/icon-button";
 import { EditorChangeTransaction } from "./editor-change-transaction";
 
@@ -151,7 +153,7 @@ export class GenerateContentModal extends Modal {
         providerId: this.plugin.settings.defaultEditProviderId
       });
 
-      this.generatedContent = response.content.trim();
+      this.generatedContent = normalizeMermaidMarkdown(response.content.trim());
       this.citations = response.citations;
       this.renderPreview(this.generatedContent || "没有收到 AI 响应。", this.generatedContent ? "ready" : "error");
       this.renderCitations();
@@ -238,7 +240,9 @@ export class GenerateContentModal extends Modal {
     const renderComponent = new Component();
     renderComponent.load();
     this.previewRenderComponent = renderComponent;
-    void MarkdownRenderer.render(this.app, content, preEl, "", renderComponent);
+    void MarkdownRenderer.render(this.app, content, preEl, "", renderComponent).then(() => {
+      if (preEl.isConnected) enhanceMermaidArtifacts(preEl, extractMermaidSources(content));
+    });
   }
 
   private renderCitations(): void {
@@ -319,7 +323,8 @@ function buildGenerationPrompt(prompt: string): string {
   return [
     "请根据用户提示生成适合 Obsidian 笔记的 Markdown 内容。",
     "要求：",
-    "- 只输出正文，不要包裹代码块。",
+    "- 只输出正文，不要把整篇内容包裹为代码块。",
+    "- 如果用户要求图表，必须输出完整的 ```mermaid 代码块，以便 Obsidian 直接渲染。",
     "- 使用清晰标题、列表或段落结构。",
     "- 如果上下文不足，请给出合理草稿，不要编造具体事实。",
     "",

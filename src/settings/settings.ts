@@ -2,6 +2,7 @@ import { ContextScope } from "../context/scope-types";
 import { StoredChatSession } from "../chat/types";
 import { AIProviderConfig } from "../providers/types";
 import { PromptTemplate } from "../templates/types";
+import type { ModificationSnapshot } from "../modifications/types";
 
 export type ObsidianAISettings = {
   providers: AIProviderConfig[];
@@ -16,4 +17,5 @@ export type ObsidianAISettings = {
   diagramFolder: string;
   diagramMaxNodes: number;
   diagramAutoEmbed: boolean;
+  lastModificationSnapshot?: ModificationSnapshot;
 };

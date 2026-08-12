@@ -1,4 +1,5 @@
 import { setIcon } from "obsidian";
+import { createMermaidMarkdown } from "../utils/mermaid";
 
 export function extractMermaidSources(markdown: string): string[] {
   return Array.from(markdown.matchAll(/```mermaid\s*\r?\n([\s\S]*?)```/gi))
@@ -56,7 +57,7 @@ function createMermaidArtifact(diagram: HTMLElement, source: string): void {
   sourceButton.disabled = !source;
   tabs.appendChild(sourceButton);
 
-  const copyButton = createIconButton(ownerDocument, "copy", "复制 Mermaid 源代码");
+  const copyButton = createIconButton(ownerDocument, "copy", "复制为 Mermaid Markdown");
   copyButton.disabled = !source;
   controls.appendChild(copyButton);
   const fullscreenButton = createIconButton(ownerDocument, "maximize-2", "全屏查看");
@@ -99,12 +100,13 @@ function createMermaidArtifact(diagram: HTMLElement, source: string): void {
   previewButton.addEventListener("click", showPreview);
   sourceButton.addEventListener("click", showSource);
   copyButton.addEventListener("click", async () => {
-    await navigator.clipboard.writeText(source);
+    await navigator.clipboard.writeText(createMermaidMarkdown(source));
     setIcon(copyButton, "check");
     copyButton.title = "已复制";
     ownerDocument.defaultView?.setTimeout(() => {
       setIcon(copyButton, "copy");
-      copyButton.title = "复制 Mermaid 源代码";
+      copyButton.title = "复制为 Mermaid Markdown";
+      copyButton.setAttribute("aria-label", copyButton.title);
     }, 1200);
   });
   const setFullscreen = (fullscreen: boolean): void => {

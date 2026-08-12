@@ -1,7 +1,7 @@
 import { App, Modal, setIcon } from "obsidian";
 import { createIconButton } from "./icon-button";
 
-type DiffOp = {
+export type DiffOp = {
   type: "equal" | "added" | "removed";
   text: string;
 };
@@ -73,7 +73,7 @@ export class DiffPreviewModal extends Modal {
 
 }
 
-function buildLineDiff(original: string, proposed: string): DiffOp[] {
+export function buildLineDiff(original: string, proposed: string): DiffOp[] {
   const oldLines = original.split(/\r?\n/);
   const newLines = proposed.split(/\r?\n/);
 

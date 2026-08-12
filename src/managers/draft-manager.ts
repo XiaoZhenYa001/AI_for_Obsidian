@@ -1,6 +1,7 @@
 import { normalizePath, Notice, TFile, TFolder } from "obsidian";
 import type ObsidianAIPlugin from "../main";
 import { KnowledgeHealthReport } from "../knowledge/types";
+import { normalizeMermaidMarkdown } from "../utils/mermaid";
 
 const AI_FOLDER = "AI Second Brain";
 
@@ -52,7 +53,7 @@ export class DraftManager {
     await this.ensureFolder(folder);
     const prefix = sanitizeFilename(title || "Generated Note");
     const path = this.createUniqueDraftPath(folder, prefix);
-    return this.plugin.app.vault.create(path, content);
+    return this.plugin.app.vault.create(path, normalizeMermaidMarkdown(content));
   }
 
   async createHealthReport(): Promise<KnowledgeHealthReport | undefined> {

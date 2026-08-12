@@ -40,6 +40,8 @@ function debouncedSave(fn: () => Promise<void>, delay = 500): void {
 export class ObsidianAISettingTab extends PluginSettingTab {
   private readonly expandedCards = new Set<string>();
   private readonly initializedCards = new Set<string>();
+  private activeSubview?: "guide";
+  private settingsHostEls: HTMLElement[] = [];
 
   constructor(app: App, private readonly plugin: ObsidianAIPlugin) {
     super(app, plugin);
@@ -49,6 +51,18 @@ export class ObsidianAISettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
     containerEl.addClass("ai-second-brain-settings");
+    this.clearSettingsHostClasses();
+    let host = containerEl.parentElement;
+    for (let depth = 0; host && depth < 2; depth += 1) {
+      host.addClass("ai-second-brain-settings-host");
+      this.settingsHostEls.push(host);
+      host = host.parentElement;
+    }
+
+    if (this.activeSubview === "guide") {
+      this.renderGuideSubview(containerEl);
+      return;
+    }
 
     this.renderSettingsHero(containerEl);
     this.renderSettingsNavigation(containerEl);
@@ -67,6 +81,16 @@ export class ObsidianAISettingTab extends PluginSettingTab {
     });
   }
 
+  hide(): void {
+    this.activeSubview = undefined;
+    this.clearSettingsHostClasses();
+  }
+
+  private clearSettingsHostClasses(): void {
+    for (const host of this.settingsHostEls) host.removeClass("ai-second-brain-settings-host");
+    this.settingsHostEls = [];
+  }
+
   private renderSettingsHero(containerEl: HTMLElement): void {
     const hero = containerEl.createDiv({ cls: "ai-second-brain-settings-hero" });
     const icon = hero.createDiv({ cls: "ai-second-brain-settings-hero-icon" });
@@ -83,19 +107,27 @@ export class ObsidianAISettingTab extends PluginSettingTab {
       cls: "ai-second-brain-settings-navigation",
       attr: { "aria-label": "设置分类" }
     });
-    const items: Array<{ target: string; icon: IconName; label: string }> = [
+    const items: Array<{ target?: string; icon: IconName; label: string; subview?: "guide" }> = [
       { target: "ai-second-brain-settings-overview", icon: "layout-dashboard", label: "概览" },
       { target: "ai-second-brain-settings-providers", icon: "server", label: "服务商" },
       { target: "ai-second-brain-settings-contexts", icon: "folder-lock", label: "上下文" },
       { target: "ai-second-brain-settings-templates", icon: "scroll-text", label: "模板" },
-      { target: "ai-second-brain-settings-diagrams", icon: "workflow", label: "图谱" }
+      { target: "ai-second-brain-settings-diagrams", icon: "workflow", label: "图谱" },
+      { icon: "book-open", label: "指南", subview: "guide" }
     ];
 
     for (const item of items) {
       const button = this.createIconButton(navigation, item.icon, item.label, "ai-second-brain-settings-navigation-item");
       button.addEventListener("click", () => {
+        if (item.subview) {
+          this.activeSubview = item.subview;
+          this.display();
+          this.containerEl.scrollTop = 0;
+          return;
+        }
         const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-        document.getElementById(item.target)?.scrollIntoView({
+        if (!item.target) return;
+        this.containerEl.querySelector<HTMLElement>(`#${item.target}`)?.scrollIntoView({
           behavior: reduceMotion ? "auto" : "smooth",
           block: "start"
         });
@@ -358,6 +390,84 @@ export class ObsidianAISettingTab extends PluginSettingTab {
           await this.plugin.saveSettings();
         })
       );
+  }
+
+  private renderGuideSection(containerEl: HTMLElement): void {
+    const quickStart = containerEl.createDiv({ cls: "ai-second-brain-guide-block" });
+    quickStart.createDiv({ cls: "ai-second-brain-guide-heading", text: "快速开始" });
+    const steps = quickStart.createDiv({ cls: "ai-second-brain-guide-steps" });
+    this.renderGuideStep(steps, "1", "配置模型", "在“AI 服务商”中添加 API，启用后分别指定聊天和编辑服务。");
+    this.renderGuideStep(steps, "2", "授权笔记", "在“上下文范围”中选择文件、文件夹、Tag 或路径规则，并确认云端访问权限。");
+    this.renderGuideStep(steps, "3", "开始使用", "点击左侧功能区的脑图标打开对话；当前范围会显示在对话顶部。");
+
+    const workflows = containerEl.createDiv({ cls: "ai-second-brain-guide-block" });
+    workflows.createDiv({ cls: "ai-second-brain-guide-heading", text: "核心工作流" });
+    const list = workflows.createDiv({ cls: "ai-second-brain-guide-list" });
+    this.renderGuideItem(list, "message-circle", "对话与上下文", "直接提问或切换跟随、锁定、手动范围。首次使用或范围变化时确认本轮文件，锁定文件会持续参与对话。");
+    this.renderGuideItem(list, "text-cursor-input", "选区 AI", "选中文字后使用浮动工具条进行解释、总结、改写、翻译、扩写或缩写；结果确认后再插入或替换原文。");
+    this.renderGuideItem(list, "folder-search", "跨笔记分析", "可直接说“分析某文件夹下的所有笔记”。插件会识别真实文件夹，并检查潜在双链、重复、冲突、缺少出处及可合并内容。");
+    this.renderGuideItem(list, "files", "批量修改计划", "在 AI 回复下点击“创建修改计划”，逐项查看 Diff 并勾选应用。删除默认不选；最近一次批次可通过命令面板撤销。");
+    this.renderGuideItem(list, "workflow", "图表与图谱", "要求生成流程图、时间线、决策树或架构图时会输出 Mermaid 成果块；也可生成可继续编辑的 Excalidraw 图谱。");
+    this.renderGuideItem(list, "quote", "引用与保存", "悬浮编号查看来源，点击可定位原文。来源变化会提示过期；“保存为带引用笔记”会生成标准 Markdown 脚注。");
+
+    const safety = containerEl.createDiv({ cls: "ai-second-brain-guide-safety" });
+    const safetyIcon = safety.createDiv({ cls: "ai-second-brain-guide-safety-icon" });
+    setIcon(safetyIcon, "shield-check");
+    const safetyCopy = safety.createDiv({ cls: "ai-second-brain-guide-safety-copy" });
+    safetyCopy.createDiv({ cls: "ai-second-brain-guide-safety-title", text: "隐私与安全" });
+    safetyCopy.createDiv({
+      cls: "ai-second-brain-guide-safety-text",
+      text: "文件检索与索引在本地完成，只有当前授权且经确认的相关内容会发送给所选 AI 服务。所有写入操作都需要用户确认；批量修改会校验快照并保留最近一次撤销记录。"
+    });
+  }
+
+  private renderGuideSubview(containerEl: HTMLElement): void {
+    containerEl.addClass("is-subview");
+    const toolbar = containerEl.createDiv({ cls: "ai-second-brain-settings-subview-toolbar" });
+    const backButton = this.createIconButton(toolbar, "arrow-left", "返回设置", "ai-second-brain-settings-subview-back");
+    backButton.addEventListener("click", () => {
+      this.activeSubview = undefined;
+      this.display();
+      this.containerEl.scrollTop = 0;
+    });
+    const heading = toolbar.createDiv({ cls: "ai-second-brain-settings-subview-heading" });
+    heading.createEl("h2", { text: "使用指南" });
+    heading.createEl("p", { text: "从首次配置到跨笔记分析、安全修改和引用追踪。" });
+
+    const content = containerEl.createDiv({ cls: "ai-second-brain-settings-subview-content" });
+    const intro = content.createDiv({ cls: "ai-second-brain-settings-subview-intro" });
+    const introIcon = intro.createDiv({ cls: "ai-second-brain-settings-subview-intro-icon" });
+    setIcon(introIcon, "book-open-check");
+    const introCopy = intro.createDiv({ cls: "ai-second-brain-settings-subview-intro-copy" });
+    introCopy.createDiv({ cls: "ai-second-brain-settings-subview-intro-title", text: "把 AI 放进笔记工作流" });
+    introCopy.createDiv({
+      cls: "ai-second-brain-settings-subview-intro-text",
+      text: "先确定模型与授权范围，再通过对话、选区工具和修改计划完成从检索到写入的闭环。"
+    });
+    this.renderGuideSection(content);
+  }
+
+  private renderGuideStep(
+    containerEl: HTMLElement,
+    number: string,
+    title: string,
+    description: string
+  ): void {
+    const item = containerEl.createDiv({ cls: "ai-second-brain-guide-step" });
+    const marker = item.createDiv({ cls: "ai-second-brain-guide-step-marker" });
+    marker.createSpan({ text: number });
+    const copy = item.createDiv({ cls: "ai-second-brain-guide-step-copy" });
+    copy.createDiv({ cls: "ai-second-brain-guide-step-title", text: title });
+    copy.createDiv({ cls: "ai-second-brain-guide-step-description", text: description });
+  }
+
+  private renderGuideItem(containerEl: HTMLElement, iconName: IconName, title: string, description: string): void {
+    const item = containerEl.createDiv({ cls: "ai-second-brain-guide-item" });
+    const icon = item.createDiv({ cls: "ai-second-brain-guide-item-icon" });
+    setIcon(icon, iconName);
+    const copy = item.createDiv({ cls: "ai-second-brain-guide-item-copy" });
+    copy.createDiv({ cls: "ai-second-brain-guide-item-title", text: title });
+    copy.createDiv({ cls: "ai-second-brain-guide-item-description", text: description });
   }
 
   private renderProvider(containerEl: HTMLElement, provider: AIProviderConfig): void {

@@ -19,4 +19,6 @@ export type Citation = {
   excerpt: string;
   startLine: number;
   endLine: number;
+  evidenceType?: "direct" | "related";
+  sourceFingerprint?: string;
 };

@@ -56,51 +56,68 @@ class ChatSessionModal extends Modal {
     const icon = header.createDiv({ cls: "ai-second-brain-modal-icon" });
     setIcon(icon, "messages-square");
     const heading = header.createDiv({ cls: "ai-second-brain-modal-heading" });
-    heading.createEl("h2", { text: this.options.mode === "create" ? "创建独立对话" : "对话设置" });
+    heading.createEl("h2", { text: this.options.mode === "create" ? "创建新对话" : "对话设置" });
     heading.createEl("p", {
       cls: "ai-second-brain-muted",
-      text: "每个对话独立保存职责、授权范围和锁定文件"
+      text: "为这段对话设置独立目标与知识范围"
     });
 
-    const form = contentEl.createDiv({ cls: "ai-second-brain-session-form" });
-    new Setting(form)
+    const scroll = contentEl.createDiv({ cls: "ai-second-brain-session-scroll" });
+    const identity = this.createSection(scroll, "对话身份", "用于在对话列表中识别，并持续约束 AI 的回答方式。", "badge-info");
+    new Setting(identity)
       .setName("对话名称")
-      .setDesc("例如：产品研究、项目周报或论文助手")
+      .setDesc("简短、明确，方便之后快速切换")
       .addText((text) => {
-        text.setPlaceholder("新对话").setValue(this.title).onChange((value) => {
+        text.setPlaceholder("例如：产品研究").setValue(this.title).onChange((value) => {
           this.title = value.trim();
         });
       });
 
-    new Setting(form)
+    new Setting(identity)
       .setName("助手职责")
-      .setDesc("这段说明会作为本对话的固定系统职责")
+      .setDesc("可留空；填写后会作为本对话的固定工作原则")
       .addTextArea((text) => {
-        text.inputEl.rows = 4;
-        text.setPlaceholder("例如：只分析项目风险，优先引用会议记录，不替我做未经确认的决定。")
+        text.inputEl.rows = 3;
+        text.setPlaceholder("例如：分析项目风险，优先引用会议记录，区分事实与建议。")
           .setValue(this.purpose)
           .onChange((value) => {
             this.purpose = value.trim();
           });
       });
 
-    new Setting(form)
-      .setName("文件识别方式")
-      .setDesc("跟随活动文件、锁定当前文件，或使用手动授权范围")
-      .addDropdown((dropdown) => {
-        dropdown
-          .addOption("follow", "跟随当前文件")
-          .addOption("locked", "锁定当前文件")
-          .addOption("manual", "手动上下文")
-          .setValue(this.contextMode)
-          .onChange((value) => {
-            this.contextMode = value as ChatSessionConfig["contextMode"];
-          });
+    const context = this.createSection(scroll, "知识范围", "决定每轮对话从哪些笔记中检索内容。", "folder-search");
+    const mode = context.createDiv({ cls: "ai-second-brain-session-mode" });
+    const modes: Array<{
+      value: ChatSessionConfig["contextMode"];
+      icon: string;
+      label: string;
+      description: string;
+    }> = [
+      { value: "follow", icon: "scan-line", label: "跟随", description: "切换笔记时同步" },
+      { value: "locked", icon: "lock-keyhole", label: "锁定", description: "固定当前笔记" },
+      { value: "manual", icon: "folder-lock", label: "手动", description: "使用授权范围" }
+    ];
+    for (const option of modes) {
+      const button = mode.createEl("button", {
+        cls: "ai-second-brain-session-mode-option",
+        attr: { type: "button", "aria-pressed": String(this.contextMode === option.value) }
       });
+      button.toggleClass("is-active", this.contextMode === option.value);
+      const optionIcon = button.createSpan({ cls: "ai-second-brain-session-mode-icon" });
+      setIcon(optionIcon, option.icon);
+      const optionCopy = button.createSpan({ cls: "ai-second-brain-session-mode-copy" });
+      optionCopy.createSpan({ cls: "ai-second-brain-session-mode-label", text: option.label });
+      optionCopy.createSpan({ cls: "ai-second-brain-session-mode-description", text: option.description });
+      button.addEventListener("click", () => {
+        this.contextMode = option.value;
+        this.render();
+      });
+    }
 
+    const form = context.createDiv({ cls: "ai-second-brain-session-form" });
     new Setting(form)
       .setName("授权范围")
-      .setDesc("自动检索和锁定文件都不会越过该范围")
+      .setDesc(this.contextMode === "manual" ? "从该范围自动检索相关笔记" : "作为文件访问和云端发送的安全边界")
       .addDropdown((dropdown) => {
         for (const scope of this.options.scopes) {
           dropdown.addOption(scope.id, scope.name);
@@ -113,8 +130,8 @@ class ChatSessionModal extends Modal {
       });
 
     new Setting(form)
-      .setName("自动选择并确认上下文")
-      .setDesc("首次使用或文件范围变化时允许调整，之后持续复用确认结果")
+      .setName("智能选择上下文")
+      .setDesc("先检索最相关笔记；首次使用或范围变化时由你确认")
       .addToggle((toggle) => {
         toggle.setValue(this.autoContext).onChange((value) => {
           this.autoContext = value;
@@ -122,15 +139,17 @@ class ChatSessionModal extends Modal {
       });
 
     if (this.lockedFilePaths.length > 0) {
-      new Setting(form)
-        .setName("锁定文件")
-        .setDesc(`${this.lockedFilePaths.length} 个文件会固定进入每轮上下文`)
-        .addExtraButton((button) => {
-          button.setIcon("pin-off").setTooltip("清除全部锁定").onClick(() => {
-            this.lockedFilePaths = [];
-            this.render();
-          });
-        });
+      const locked = context.createDiv({ cls: "ai-second-brain-session-locked" });
+      const lockedIcon = locked.createDiv({ cls: "ai-second-brain-session-locked-icon" });
+      setIcon(lockedIcon, "pin");
+      const lockedCopy = locked.createDiv({ cls: "ai-second-brain-session-locked-copy" });
+      lockedCopy.createDiv({ cls: "ai-second-brain-session-locked-title", text: `${this.lockedFilePaths.length} 个锁定文件` });
+      lockedCopy.createDiv({ cls: "ai-second-brain-session-locked-description", text: "这些文件会固定进入每轮上下文。" });
+      const clear = createIconButton(locked, "pin-off", "清除锁定", "ai-second-brain-session-locked-clear");
+      clear.addEventListener("click", () => {
+        this.lockedFilePaths = [];
+        this.render();
+      });
     }
 
     const actions = contentEl.createDiv({ cls: "ai-second-brain-modal-actions" });
@@ -154,6 +173,17 @@ class ChatSessionModal extends Modal {
       });
       this.close();
     });
+  }
+
+  private createSection(container: HTMLElement, title: string, description: string, iconName: string): HTMLElement {
+    const section = container.createDiv({ cls: "ai-second-brain-session-section" });
+    const header = section.createDiv({ cls: "ai-second-brain-session-section-header" });
+    const icon = header.createDiv({ cls: "ai-second-brain-session-section-icon" });
+    setIcon(icon, iconName);
+    const copy = header.createDiv({ cls: "ai-second-brain-session-section-copy" });
+    copy.createDiv({ cls: "ai-second-brain-session-section-title", text: title });
+    copy.createDiv({ cls: "ai-second-brain-session-section-description", text: description });
+    return section;
   }
 
   onClose(): void {

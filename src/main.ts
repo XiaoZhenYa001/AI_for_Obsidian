@@ -33,6 +33,7 @@ import { PromptTemplate } from "./templates/types";
 import { isContextFile, isContextFilePath } from "./utils/context-files";
 import { createSelectionToolbarExtension } from "./ui/selection-toolbar";
 import { enhanceMermaidArtifacts, extractMermaidSources } from "./ui/mermaid-artifact";
+import { ModificationService } from "./modifications/modification-service";
 
 const CHAT_MESSAGE_LIMIT = 40;
 const CHAT_SESSION_LIMIT = 30;
@@ -58,6 +59,7 @@ export default class ObsidianAIPlugin extends Plugin {
   providerManager!: ProviderManager;
   draftManager!: DraftManager;
   diagramService!: DiagramService;
+  modificationService!: ModificationService;
   private lastMarkdownView?: MarkdownView;
   private statusBarEl?: HTMLElement;
   private readonly pendingSelectionReferences = new Map<string, SelectionReference[]>();
@@ -75,6 +77,7 @@ export default class ObsidianAIPlugin extends Plugin {
     this.providerManager = new ProviderManager(this);
     this.draftManager = new DraftManager(this);
     this.diagramService = new DiagramService(this);
+    this.modificationService = new ModificationService(this);
     this.registerEditorExtension(createSelectionToolbarExtension(this));
     this.registerMarkdownPostProcessor((element, context) => {
       if (element.closest(".ai-second-brain-message-content, .ai-second-brain-chat-render-staging")) {
@@ -167,6 +170,14 @@ export default class ObsidianAIPlugin extends Plugin {
     });
 
     this.addCommand({
+      id: "undo-last-ai-modification-batch",
+      name: "AI: Undo last modification batch",
+      callback: () => {
+        void this.undoLastModificationBatch();
+      }
+    });
+
+    this.addCommand({
       id: "ai-generate-content",
       name: "AI: Generate content",
       editorCallback: (editor) => {
@@ -230,6 +241,7 @@ export default class ObsidianAIPlugin extends Plugin {
     this.registerEvent(
       this.app.vault.on("rename", (file, oldPath) => {
         this.textSearchService.invalidateFile(oldPath);
+        void this.updateStoredCitationPaths(oldPath, file.path);
 
         if (isContextFile(file)) {
           this.textSearchService.invalidateFile(file.path);
@@ -267,6 +279,51 @@ export default class ObsidianAIPlugin extends Plugin {
     }
 
     this.app.workspace.revealLeaf(leaf);
+  }
+
+  private async undoLastModificationBatch(): Promise<void> {
+    try {
+      const count = await this.modificationService.undoLastBatch();
+      new Notice(`已撤销最近一批 AI 修改，共恢复 ${count} 项。`);
+    } catch (error) {
+      new Notice(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  private async updateStoredCitationPaths(oldPath: string, newPath: string): Promise<void> {
+    let changed = false;
+    for (const session of this.settings.chatSessions) {
+      for (const message of session.messages) {
+        for (const citation of message.citations || []) {
+          if (citation.filePath === oldPath) {
+            citation.filePath = newPath;
+            changed = true;
+          }
+        }
+        for (const reference of message.selectionReferences || []) {
+          if (reference.filePath === oldPath) {
+            reference.filePath = newPath;
+            reference.fileName = newPath.split("/").pop() || newPath;
+            changed = true;
+          }
+        }
+      }
+    }
+    for (const references of this.pendingSelectionReferences.values()) {
+      for (const reference of references) {
+        if (reference.filePath === oldPath) {
+          reference.filePath = newPath;
+          reference.fileName = newPath.split("/").pop() || newPath;
+        }
+      }
+    }
+    for (const leaf of this.app.workspace.getLeavesOfType(AI_CHAT_VIEW_TYPE)) {
+      if (leaf.view instanceof AIChatView) leaf.view.handleFileRename(oldPath, newPath);
+    }
+    if (changed) {
+      await this.saveSettings();
+      this.refreshChatViews();
+    }
   }
 
   getEditableMarkdownView(): MarkdownView | undefined {
@@ -656,6 +713,33 @@ export default class ObsidianAIPlugin extends Plugin {
     return session;
   }
 
+  async deleteChatSessions(sessionIds: string[]): Promise<StoredChatSession> {
+    const ids = new Set(sessionIds);
+    if (ids.size === 0) {
+      return this.getActiveChatSession();
+    }
+
+    this.settings.chatSessions = this.settings.chatSessions.filter((session) => !ids.has(session.id));
+    for (const sessionId of ids) {
+      this.pendingSelectionReferences.delete(sessionId);
+    }
+
+    if (this.settings.chatSessions.length === 0) {
+      this.settings.chatSessions.push(createChatSessionRecord(this.settings.activeContextScopeId));
+    }
+
+    if (!this.settings.chatSessions.some((session) => session.id === this.settings.activeChatSessionId)) {
+      this.settings.activeChatSessionId = this.settings.chatSessions[0].id;
+    }
+
+    const active = this.getActiveChatSession();
+    if (this.settings.contextScopes.some((scope) => scope.id === active.contextScopeId)) {
+      this.settings.activeContextScopeId = active.contextScopeId;
+    }
+    await this.saveSettings();
+    return active;
+  }
+
   async saveChatSessionMessages(sessionId: string, messages: StoredChatMessage[]): Promise<void> {
     const session = this.settings.chatSessions.find((item) => item.id === sessionId);
 
@@ -747,7 +831,8 @@ export default class ObsidianAIPlugin extends Plugin {
       activeChatSessionId,
       diagramFolder: saved?.diagramFolder || DEFAULT_SETTINGS.diagramFolder,
       diagramMaxNodes: clampDiagramMaxNodes(saved?.diagramMaxNodes),
-      diagramAutoEmbed: saved?.diagramAutoEmbed ?? DEFAULT_SETTINGS.diagramAutoEmbed
+      diagramAutoEmbed: saved?.diagramAutoEmbed ?? DEFAULT_SETTINGS.diagramAutoEmbed,
+      lastModificationSnapshot: saved?.lastModificationSnapshot
     };
   }
 
