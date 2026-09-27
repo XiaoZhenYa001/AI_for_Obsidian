@@ -1,4 +1,4 @@
-import { missingModel } from "./errors";
+import { missingModel, streamError } from "./errors";
 import { BaseProvider } from "./base-provider";
 import { AIProviderConfig, ChatRequest, ChatStreamEvent } from "./types";
 
@@ -89,7 +89,7 @@ function parseOllamaStreamLine(line: string): ChatStreamEvent | "done" | undefin
   };
 
   if (data.error) {
-    throw new Error(data.error);
+    throw streamError(data.error);
   }
 
   if (data.done) {

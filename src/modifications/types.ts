@@ -28,4 +28,6 @@ export type ModificationSnapshotEntry = {
 export type ModificationSnapshot = {
   createdAt: string;
   entries: ModificationSnapshotEntry[];
+  /** Keep an incomplete rollback or undo until the remaining entries are restored. */
+  recoveryPending?: boolean;
 };

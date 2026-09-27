@@ -1,4 +1,4 @@
-import { missingModel } from "./errors";
+import { missingModel, streamError } from "./errors";
 import { BaseProvider } from "./base-provider";
 import { AIProviderConfig, ChatRequest, ChatStreamEvent } from "./types";
 
@@ -103,7 +103,7 @@ function parseOpenAIStreamLine(line: string): ChatStreamEvent | "done" | undefin
   };
 
   if (data.error?.message) {
-    throw new Error(data.error.message);
+    throw streamError(data.error.message);
   }
 
   const content = data.choices?.[0]?.delta?.content;

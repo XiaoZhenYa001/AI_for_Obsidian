@@ -20,6 +20,7 @@ export type StoredChatMessage = {
   citations?: Citation[];
   selectionReferences?: SelectionReference[];
   createdAt: string;
+  status?: "complete" | "error" | "stopped";
 };
 
 export type StoredChatSession = {
@@ -37,6 +38,7 @@ export type StoredChatSession = {
   messages: StoredChatMessage[];
   createdAt: string;
   updatedAt: string;
+  archived?: boolean;
 };
 
 export type ChatSessionConfig = Pick<

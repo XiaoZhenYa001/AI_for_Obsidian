@@ -1,4 +1,4 @@
-import { missingApiKey, missingModel } from "./errors";
+import { missingApiKey, missingModel, streamError } from "./errors";
 import { BaseProvider } from "./base-provider";
 import { AIProviderConfig, ChatMessage, ChatRequest, ChatStreamEvent } from "./types";
 
@@ -159,7 +159,7 @@ function parseAnthropicStreamEvent(eventText: string): ChatStreamEvent | "done" 
   };
 
   if (data.type === "error") {
-    throw new Error(data.error?.message || "Anthropic stream returned an error.");
+    throw streamError(data.error?.message || "Anthropic stream returned an error.");
   }
 
   if (data.type === "message_stop") {

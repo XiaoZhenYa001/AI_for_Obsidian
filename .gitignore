@@ -4,4 +4,5 @@ main.js
 dist/
 .DS_Store
 data.json
-
+.test-output/
+__pycache__/

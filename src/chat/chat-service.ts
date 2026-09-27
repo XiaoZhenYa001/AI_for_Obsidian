@@ -11,11 +11,13 @@ export type ChatResult = {
 };
 
 export type ChatOptions = {
+  /** Controls additional note retrieval; source-scope privacy rules still apply. */
   useContext?: boolean;
   providerId?: string;
   model?: string;
   temperature?: number;
   contextScopeId?: string;
+  /** Source policy for both direct content and retrieved notes; defaults to the active scope. */
   contextScope?: ContextScope;
   signal?: AbortSignal;
   history?: ChatMessage[];
@@ -37,10 +39,6 @@ export class ChatService {
   async sendMessage(content: string, options: ChatOptions = {}): Promise<ChatResult> {
     const payload = await this.buildChatPayload(content, options);
 
-    if (!payload.provider) {
-      throw new Error(payload.fallbackContent);
-    }
-
     const response = await payload.provider.chat(payload.request);
 
     return {
@@ -52,13 +50,6 @@ export class ChatService {
   async streamMessage(content: string, options: ChatOptions = {}): Promise<ChatStreamResult> {
     const payload = await this.buildChatPayload(content, options);
 
-    if (!payload.provider) {
-      return {
-        citations: [],
-        stream: singleChunkStream(payload.fallbackContent)
-      };
-    }
-
     return {
       citations: payload.citations,
       stream: streamProvider(payload.provider, payload.request)
@@ -68,43 +59,20 @@ export class ChatService {
   private async buildChatPayload(
     content: string,
     options: ChatOptions
-  ): Promise<
-    | {
-        provider: AIProvider;
-        request: ChatRequest;
-        citations: Citation[];
-        fallbackContent: "";
-      }
-    | {
-        provider: undefined;
-        request: undefined;
-        citations: [];
-        fallbackContent: string;
-      }
-  > {
+  ): Promise<{ provider: AIProvider; request: ChatRequest; citations: Citation[] }> {
     const provider =
       this.plugin.providerRegistry.get(options.providerId) ||
       this.plugin.providerRegistry.get(this.plugin.settings.defaultChatProviderId) ||
       this.plugin.providerRegistry.getFirstAvailable();
 
     if (!provider) {
-      return {
-        provider: undefined,
-        request: undefined,
-        citations: [],
-        fallbackContent: "还没有配置可用的 AI 服务商。请先在设置页添加 OpenAI-compatible 或 Ollama 服务。"
-      };
+      throw new Error("还没有配置可用的 AI 服务商。请先在设置页添加 AI 服务。");
     }
 
     const contextScope = this.resolveContextScope(options);
 
     if (contextScope && !contextScope.allowCloudModels && provider.config.type !== "ollama") {
-      return {
-        provider: undefined,
-        request: undefined,
-        citations: [],
-        fallbackContent: `当前上下文「${contextScope.name}」已禁止云端模型访问。请切换到本地 Ollama Provider，或在设置中允许云端模型。`
-      };
+      throw new Error(`当前上下文「${contextScope.name}」已禁止云端模型访问。请切换到本地 Ollama Provider，或在设置中允许云端模型。`);
     }
 
     const retrievedContext =
@@ -119,7 +87,8 @@ export class ChatService {
           "若使用了授权笔记上下文，请尽量用 [1]、[2] 这样的编号标注依据；如果上下文不足，请直接说明。",
           "直接来自笔记的事实使用编号引用；跨笔记归纳或无法由单一来源直接支持的内容必须明确标注为“推断”。",
           "当用户要求流程图、时序图、状态图、决策树或系统架构图时，优先输出 Obsidian 可直接渲染的 \`\`\`mermaid 代码块。",
-          "Mermaid 应使用兼容语法，节点文字包含空格或标点时使用双引号，不要在图中使用 HTML。"
+          "Mermaid 应使用兼容语法，节点文字包含空格或标点时使用双引号，不要在图中使用 HTML。",
+          "当用户要求 HTML 页面或交互工具时，返回完整、自包含的 \`\`\`html 代码块，CSS 和 JavaScript 内联，默认不依赖远程资源。"
         ].join("\n")
       }
     ];
@@ -158,8 +127,7 @@ export class ChatService {
         temperature: options.temperature ?? provider.config.temperature,
         signal: options.signal
       },
-      citations: retrievedContext.citations,
-      fallbackContent: ""
+      citations: retrievedContext.citations
     };
   }
 
@@ -181,6 +149,8 @@ export class ChatService {
       return file ? [file] : [];
     });
     const files = uniqueFiles([...selectedFiles, ...lockedFiles]);
+    const requestFilesByPath = new Map(files.map((file) => [file.path, file]));
+    const requestPaths = new Set(requestFilesByPath.keys());
 
     if (files.length === 0) {
       return {
@@ -195,7 +165,7 @@ export class ChatService {
       const representedPaths = new Set(retrievedChunks.map((chunk) => chunk.filePath));
       const missingFiles = selectedFiles.filter((file) => !representedPaths.has(file.path));
       const coverageChunks = compactCoverageChunks(
-        await this.plugin.textSearchService.getRepresentativeChunks(missingFiles)
+        await this.plugin.textSearchService.getRepresentativeChunks(missingFiles, 1, requestPaths)
       );
       for (const chunk of coverageChunks) {
         if (!retrievedIds.has(chunk.id)) {
@@ -204,8 +174,8 @@ export class ChatService {
         }
       }
     }
-    const embeddedFiles = this.resolveEmbeddedFiles(retrievedChunks, authorizedByPath);
-    const embeddedChunks = await this.plugin.textSearchService.getRepresentativeChunks(embeddedFiles);
+    const embeddedFiles = this.resolveEmbeddedFiles(retrievedChunks, requestFilesByPath);
+    const embeddedChunks = await this.plugin.textSearchService.getRepresentativeChunks(embeddedFiles, 1, requestPaths);
 
     for (const chunk of embeddedChunks) {
       if (!retrievedIds.has(chunk.id)) {
@@ -216,7 +186,7 @@ export class ChatService {
 
     const representedLockedPaths = new Set(retrievedChunks.map((chunk) => chunk.filePath));
     const missingLockedFiles = lockedFiles.filter((file) => !representedLockedPaths.has(file.path));
-    const lockedChunks = await this.plugin.textSearchService.getRepresentativeChunks(missingLockedFiles);
+    const lockedChunks = await this.plugin.textSearchService.getRepresentativeChunks(missingLockedFiles, 1, requestPaths);
 
     for (const chunk of lockedChunks) {
       if (!retrievedIds.has(chunk.id)) {
@@ -233,21 +203,21 @@ export class ChatService {
     }
 
     return {
-      summary: formatRetrievedChunks(retrievedChunks),
+      summary: formatRetrievedChunks(retrievedChunks, requestPaths),
       citations: buildCitations(retrievedChunks)
     };
   }
 
   private resolveEmbeddedFiles(
     chunks: RetrievedChunk[],
-    authorizedByPath: Map<string, TFile>
+    requestFilesByPath: Map<string, TFile>
   ): TFile[] {
     const files = new Map<string, TFile>();
 
     for (const chunk of chunks) {
       for (const match of chunk.content.matchAll(/!\[\[([^\]|#]+)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]/g)) {
         const target = this.plugin.app.metadataCache.getFirstLinkpathDest(match[1].trim(), chunk.filePath);
-        const authorized = target ? authorizedByPath.get(target.path) : undefined;
+        const authorized = target ? requestFilesByPath.get(target.path) : undefined;
         if (authorized) {
           files.set(authorized.path, authorized);
         }
@@ -261,13 +231,17 @@ export class ChatService {
   }
 
   private resolveContextScope(options: ChatOptions): ContextScope | undefined {
-    if (options.useContext === false) {
-      return undefined;
+    if (options.contextScope) {
+      return options.contextScope;
     }
-
-    return options.contextScope || (options.contextScopeId
-      ? this.plugin.settings.contextScopes.find((item) => item.id === options.contextScopeId)
-      : this.plugin.getActiveContextScope());
+    if (options.contextScopeId) {
+      const scope = this.plugin.settings.contextScopes.find((item) => item.id === options.contextScopeId);
+      if (!scope) {
+        throw new Error("指定的上下文范围已不存在，请重新选择后再发送。");
+      }
+      return scope;
+    }
+    return this.plugin.getActiveContextScope();
   }
 }
 
@@ -318,11 +292,7 @@ async function* streamProvider(provider: AIProvider, request: ChatRequest): Asyn
   }
 }
 
-async function* singleChunkStream(content: string): AsyncIterable<string> {
-  yield content;
-}
-
-function formatRetrievedChunks(chunks: RetrievedChunk[]): string {
+function formatRetrievedChunks(chunks: RetrievedChunk[], allowedPaths: ReadonlySet<string>): string {
   const summarizedFiles = new Set<string>();
 
   return chunks
@@ -330,11 +300,16 @@ function formatRetrievedChunks(chunks: RetrievedChunk[]): string {
       const heading = chunk.headingPath && chunk.headingPath.length > 0
         ? `\n标题路径：${chunk.headingPath.join(" > ")}`
         : chunk.heading ? `\n标题：${chunk.heading}` : "";
-      const includeSemantics = Boolean(chunk.semanticContext) && !summarizedFiles.has(chunk.filePath);
+      const incomingLinks = (chunk.incomingLinks || []).filter((path) => allowedPaths.has(path));
+      const semanticContext = [
+        chunk.semanticContext,
+        incomingLinks.length > 0 ? `反向链接：${incomingLinks.join("、")}` : ""
+      ].filter(Boolean).join("\n");
+      const includeSemantics = Boolean(semanticContext) && !summarizedFiles.has(chunk.filePath);
       if (includeSemantics) {
         summarizedFiles.add(chunk.filePath);
       }
-      const semantics = includeSemantics ? `\n结构信息：\n${chunk.semanticContext}` : "";
+      const semantics = includeSemantics ? `\n结构信息：\n${semanticContext}` : "";
       return `[${index + 1}] 文件：${chunk.filePath}${heading}${semantics}\n行号：${chunk.startLine}-${chunk.endLine}\n内容：\n${chunk.content}`;
     })
     .join("\n\n---\n\n");

@@ -17,6 +17,7 @@ export class ChatSessionManagerModal extends Modal {
   private listEl?: HTMLElement;
   private footerEl?: HTMLElement;
   private searchInput?: HTMLInputElement;
+  private showArchived = false;
 
   constructor(
     app: App,
@@ -59,6 +60,15 @@ export class ChatSessionManagerModal extends Modal {
       this.query = this.searchInput?.value.trim().toLowerCase() || "";
       this.renderList();
     });
+    const archived = createIconButton(search, "archive", "显示已归档对话");
+    archived.addEventListener("click", () => {
+      this.showArchived = !this.showArchived;
+      this.selected.clear();
+      archived.toggleClass("is-active", this.showArchived);
+      archived.setAttribute("aria-pressed", String(this.showArchived));
+      this.renderList();
+      this.renderFooter();
+    });
 
     this.listEl = this.contentEl.createDiv({ cls: "ai-second-brain-session-manager-list" });
     this.footerEl = this.contentEl.createDiv({ cls: "ai-second-brain-session-manager-footer" });
@@ -71,6 +81,7 @@ export class ChatSessionManagerModal extends Modal {
     if (!this.listEl) return;
     this.listEl.empty();
     const sessions = this.plugin.settings.chatSessions.filter((session) => {
+      if (Boolean(session.archived) !== this.showArchived) return false;
       if (!this.query) return true;
       return `${session.title} ${session.purpose}`.toLowerCase().includes(this.query);
     });
@@ -136,6 +147,12 @@ export class ChatSessionManagerModal extends Modal {
 
     if (this.selectionMode) return;
     const action = item.createDiv({ cls: "ai-second-brain-session-manager-item-action" });
+    const archive = createIconButton(action, session.archived ? "archive-restore" : "archive", session.archived ? "恢复对话" : "归档对话");
+    archive.addEventListener("click", () => {
+      void this.plugin.setChatSessionArchived(session.id, !session.archived).then(() => this.renderList()).catch((error: unknown) => {
+        new Notice(error instanceof Error ? error.message : String(error));
+      });
+    });
     if (isConfirming) {
       const cancel = createIconButton(action, "undo-2", "取消删除", "ai-second-brain-session-delete-cancel");
       cancel.addEventListener("click", () => {
@@ -164,7 +181,10 @@ export class ChatSessionManagerModal extends Modal {
     const selection = this.footerEl.createDiv({ cls: "ai-second-brain-session-manager-selection" });
     const selectAll = selection.createEl("button", { text: "全选", attr: { type: "button" } });
     selectAll.addEventListener("click", () => {
-      this.selected = new Set(this.plugin.settings.chatSessions.map((session) => session.id));
+      this.selected = new Set(this.plugin.settings.chatSessions.filter((session) =>
+        Boolean(session.archived) === this.showArchived &&
+        (!this.query || `${session.title} ${session.purpose}`.toLowerCase().includes(this.query))
+      ).map((session) => session.id));
       this.batchConfirming = false;
       this.renderList();
       this.renderFooter();

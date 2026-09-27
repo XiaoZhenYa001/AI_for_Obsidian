@@ -34,6 +34,7 @@ export class TextSearchService {
   private index = new Map<string, IndexedFile>();
   private chunksById = new Map<string, NoteChunk>();
   private postings = new Map<string, Set<string>>();
+  private incomingLinksByTarget?: Map<string, string[]>;
   private lastRebuildAt?: string;
 
   constructor(private readonly app: App) {}
@@ -42,6 +43,7 @@ export class TextSearchService {
     this.index.clear();
     this.chunksById.clear();
     this.postings.clear();
+    this.invalidateLinks();
 
     await this.ensureFilesIndexed(files, true);
 
@@ -51,12 +53,18 @@ export class TextSearchService {
 
   invalidateFile(path: string): void {
     this.removeIndexedFile(path);
+    this.invalidateLinks();
+  }
+
+  invalidateLinks(): void {
+    this.incomingLinksByTarget = undefined;
   }
 
   clear(): void {
     this.index.clear();
     this.chunksById.clear();
     this.postings.clear();
+    this.invalidateLinks();
     this.lastRebuildAt = undefined;
   }
 
@@ -88,6 +96,7 @@ export class TextSearchService {
         fallbackResults.push(
           ...indexedFile.chunks.slice(0, limit).map((chunk) => ({
             ...chunk,
+            incomingLinks: this.getAuthorizedIncomingLinks(chunk.filePath, allowedPaths),
             score: 0.1
           }))
         );
@@ -97,6 +106,10 @@ export class TextSearchService {
     const candidateHits = new Map<string, number>();
     for (const term of terms) {
       for (const chunkId of this.postings.get(term) || []) {
+        const chunk = this.chunksById.get(chunkId);
+        if (!chunk || !allowedPaths.has(chunk.filePath)) {
+          continue;
+        }
         candidateHits.set(chunkId, (candidateHits.get(chunkId) || 0) + 1);
       }
     }
@@ -123,6 +136,7 @@ export class TextSearchService {
       if (score > 0) {
         results.push({
           ...chunk,
+          incomingLinks: this.getAuthorizedIncomingLinks(chunk.filePath, allowedPaths),
           score
         });
       }
@@ -159,7 +173,11 @@ export class TextSearchService {
       .slice(0, limit);
   }
 
-  async getRepresentativeChunks(files: TFile[], limitPerFile = 1): Promise<RetrievedChunk[]> {
+  async getRepresentativeChunks(
+    files: TFile[],
+    limitPerFile = 1,
+    authorizedPaths: ReadonlySet<string> = new Set(files.map((file) => file.path))
+  ): Promise<RetrievedChunk[]> {
     const results: RetrievedChunk[] = [];
     await this.ensureFilesIndexed(files);
 
@@ -169,6 +187,7 @@ export class TextSearchService {
       results.push(
         ...indexedFile.chunks.slice(0, limitPerFile).map((chunk) => ({
           ...chunk,
+          incomingLinks: this.getAuthorizedIncomingLinks(chunk.filePath, authorizedPaths),
           score: 0.05
         }))
       );
@@ -197,7 +216,7 @@ export class TextSearchService {
   private async indexFile(file: TFile): Promise<IndexedFile> {
     this.removeIndexedFile(file.path);
     const rawContent = await this.app.vault.cachedRead(file);
-    const prepared = prepareContextDocument(file.path, rawContent, this.getIncomingLinks(file.path));
+    const prepared = prepareContextDocument(file.path, rawContent);
     const chunks = chunkMarkdown(file.path, prepared.content, undefined, prepared.semanticContext);
     const termChunkIds = new Map<string, Set<string>>();
     for (const chunk of chunks) {
@@ -238,16 +257,22 @@ export class TextSearchService {
     this.index.delete(path);
   }
 
-  private getIncomingLinks(filePath: string): string[] {
-    const incoming: string[] = [];
-
-    for (const [sourcePath, targets] of Object.entries(this.app.metadataCache.resolvedLinks)) {
-      if (targets[filePath] !== undefined) {
-        incoming.push(sourcePath);
+  private getAuthorizedIncomingLinks(filePath: string, authorizedPaths: ReadonlySet<string>): string[] {
+    if (!this.incomingLinksByTarget) {
+      const incomingLinksByTarget = new Map<string, string[]>();
+      for (const [sourcePath, targets] of Object.entries(this.app.metadataCache.resolvedLinks)) {
+        for (const targetPath of Object.keys(targets)) {
+          const incoming = incomingLinksByTarget.get(targetPath) || [];
+          incoming.push(sourcePath);
+          incomingLinksByTarget.set(targetPath, incoming);
+        }
       }
+      this.incomingLinksByTarget = incomingLinksByTarget;
     }
 
-    return incoming.slice(0, 20);
+    return (this.incomingLinksByTarget.get(filePath) || [])
+      .filter((sourcePath) => authorizedPaths.has(sourcePath))
+      .slice(0, 20);
   }
 }
 

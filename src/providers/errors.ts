@@ -5,6 +5,7 @@ export type ProviderErrorCode =
   | "network-error"
   | "empty-response"
   | "invalid-response"
+  | "stream-error"
   | "aborted";
 
 export class ProviderError extends Error {
@@ -40,6 +41,10 @@ export function httpError(providerName: string, status: number, message?: string
 
 export function invalidResponse(providerName: string, details?: unknown): ProviderError {
   return new ProviderError("invalid-response", `Provider "${providerName}" returned an invalid response.`, details);
+}
+
+export function streamError(message: string): ProviderError {
+  return new ProviderError("stream-error", message);
 }
 
 export function normalizeProviderError(error: unknown, providerName: string): ProviderError {

@@ -4,6 +4,7 @@ export type NoteChunk = {
   heading?: string;
   headingPath?: string[];
   semanticContext?: string;
+  incomingLinks?: string[];
   content: string;
   startLine: number;
   endLine: number;

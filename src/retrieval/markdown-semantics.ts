@@ -7,24 +7,23 @@ export type PreparedContextDocument = {
 
 export function prepareContextDocument(
   filePath: string,
-  rawContent: string,
-  incomingLinks: string[] = []
+  rawContent: string
 ): PreparedContextDocument {
   if (filePath.toLowerCase().endsWith(".canvas")) {
-    return prepareCanvasDocument(rawContent, incomingLinks);
+    return prepareCanvasDocument(rawContent);
   }
 
   if (filePath.toLowerCase().endsWith(".excalidraw")) {
-    return prepareExcalidrawDocument(rawContent, incomingLinks);
+    return prepareExcalidrawDocument(rawContent);
   }
 
   return {
     content: rawContent,
-    semanticContext: extractMarkdownSemantics(filePath, rawContent, incomingLinks)
+    semanticContext: extractMarkdownSemantics(filePath, rawContent)
   };
 }
 
-function extractMarkdownSemantics(filePath: string, content: string, incomingLinks: string[]): string {
+function extractMarkdownSemantics(filePath: string, content: string): string {
   const frontmatter = readFrontmatter(content);
   const headings = Array.from(content.matchAll(/^(#{1,6})\s+(.+)$/gm))
     .map((match) => `${match[1].length}:${cleanInline(match[2])}`)
@@ -58,7 +57,6 @@ function extractMarkdownSemantics(filePath: string, content: string, incomingLin
   appendSummary(lines, "别名", aliases);
   appendSummary(lines, "Tags", unique([...frontmatterTags, ...tags]));
   appendSummary(lines, "Wiki Links", links);
-  appendSummary(lines, "反向链接", incomingLinks);
   appendSummary(lines, "嵌入内容", embeds);
   appendSummary(lines, "Callout", callouts);
   if (tasks.length > 0) {
@@ -72,7 +70,7 @@ function extractMarkdownSemantics(filePath: string, content: string, incomingLin
   return lines.join("\n");
 }
 
-function prepareCanvasDocument(content: string, incomingLinks: string[]): PreparedContextDocument {
+function prepareCanvasDocument(content: string): PreparedContextDocument {
   try {
     const canvas = JSON.parse(content) as {
       nodes?: Array<Record<string, unknown>>;
@@ -95,8 +93,7 @@ function prepareCanvasDocument(content: string, incomingLinks: string[]): Prepar
       semanticContext: [
         "文件类型：Obsidian Canvas",
         `节点：${nodes.length} 个`,
-        `关系：${edges.length} 条`,
-        incomingLinks.length > 0 ? `反向链接：${incomingLinks.join("、")}` : ""
+        `关系：${edges.length} 条`
       ].filter(Boolean).join("\n")
     };
   } catch {
@@ -107,7 +104,7 @@ function prepareCanvasDocument(content: string, incomingLinks: string[]): Prepar
   }
 }
 
-function prepareExcalidrawDocument(content: string, incomingLinks: string[]): PreparedContextDocument {
+function prepareExcalidrawDocument(content: string): PreparedContextDocument {
   try {
     const drawing = JSON.parse(content) as {
       elements?: Array<Record<string, unknown>>;
@@ -120,8 +117,7 @@ function prepareExcalidrawDocument(content: string, incomingLinks: string[]): Pr
       content: ["# Excalidraw 文本元素", "", ...textElements.map((text) => `- ${text}`)].join("\n"),
       semanticContext: [
         "文件类型：Excalidraw",
-        `文本元素：${textElements.length} 个`,
-        incomingLinks.length > 0 ? `反向链接：${incomingLinks.join("、")}` : ""
+        `文本元素：${textElements.length} 个`
       ].filter(Boolean).join("\n")
     };
   } catch {

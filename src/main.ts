@@ -34,9 +34,11 @@ import { isContextFile, isContextFilePath } from "./utils/context-files";
 import { createSelectionToolbarExtension } from "./ui/selection-toolbar";
 import { enhanceMermaidArtifacts, extractMermaidSources } from "./ui/mermaid-artifact";
 import { ModificationService } from "./modifications/modification-service";
-
-const CHAT_MESSAGE_LIMIT = 40;
-const CHAT_SESSION_LIMIT = 30;
+import { ExcalidrawEditService, isExcalidrawFile } from "./diagrams/excalidraw-edit-service";
+import { editDrawing } from "./diagrams/edit-drawing-modal";
+import { HTML_PREVIEW_VIEW_TYPE, HtmlPreviewView } from "./html/html-preview-view";
+import { HtmlFilePicker } from "./html/html-file-picker";
+import { startHtmlPreviewServer } from "./html/html-preview-server";
 
 const SELECTION_ACTIONS: Array<{ id: string; name: string; action: SelectionActionType }> = [
   { id: "ai-explain-selection", name: "AI: Explain selection", action: "explain" },
@@ -60,9 +62,11 @@ export default class ObsidianAIPlugin extends Plugin {
   draftManager!: DraftManager;
   diagramService!: DiagramService;
   modificationService!: ModificationService;
+  excalidrawEditService!: ExcalidrawEditService;
   private lastMarkdownView?: MarkdownView;
   private statusBarEl?: HTMLElement;
   private readonly pendingSelectionReferences = new Map<string, SelectionReference[]>();
+  private settingsSaveQueue: Promise<void> = Promise.resolve();
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -78,6 +82,7 @@ export default class ObsidianAIPlugin extends Plugin {
     this.draftManager = new DraftManager(this);
     this.diagramService = new DiagramService(this);
     this.modificationService = new ModificationService(this);
+    this.excalidrawEditService = new ExcalidrawEditService(this);
     this.registerEditorExtension(createSelectionToolbarExtension(this));
     this.registerMarkdownPostProcessor((element, context) => {
       if (element.closest(".ai-second-brain-message-content, .ai-second-brain-chat-render-staging")) {
@@ -88,6 +93,12 @@ export default class ObsidianAIPlugin extends Plugin {
     });
 
     this.registerView(AI_CHAT_VIEW_TYPE, (leaf) => new AIChatView(leaf, this));
+    this.registerView(HTML_PREVIEW_VIEW_TYPE, (leaf) => new HtmlPreviewView(leaf, startHtmlPreviewServer));
+    try {
+      this.registerExtensions(["html", "htm"], HTML_PREVIEW_VIEW_TYPE);
+    } catch (error) {
+      console.info("HTML files already have a registered view; AI HTML preview remains available from the file menu.", error);
+    }
     this.captureActiveMarkdownView();
     this.createStatusBarEntry();
 
@@ -202,6 +213,33 @@ export default class ObsidianAIPlugin extends Plugin {
       }
     });
 
+    this.addCommand({
+      id: "ai-edit-excalidraw-drawing",
+      name: "AI: Edit Excalidraw drawing",
+      callback: () => {
+        const file = this.app.workspace.getActiveFile();
+        void editDrawing(this, "", file && isExcalidrawFile(file, this.app) ? file : undefined);
+      }
+    });
+    this.registerEvent(this.app.workspace.on("file-menu", (menu, file) => {
+      if (file instanceof TFile && isExcalidrawFile(file, this.app)) {
+        menu.addItem((item) => item.setTitle("AI 编辑画布内容").setIcon("pencil-ruler")
+          .onClick(() => { void editDrawing(this, "", file); }));
+      }
+      if (file instanceof TFile && /\.html?$/i.test(file.path)) {
+        menu.addItem((item) => item.setTitle("预览 HTML 页面").setIcon("app-window")
+          .onClick(() => { void this.openHtmlPreview(file).catch((error: unknown) => new Notice(String(error))); }));
+      }
+    }));
+    this.addCommand({
+      id: "preview-html-file",
+      name: "AI: Preview HTML file",
+      callback: () => new HtmlFilePicker(this.app, (file) => {
+        void this.openHtmlPreview(file).catch((error: unknown) => new Notice(String(error)));
+      }).open()
+    });
+    this.registerEvent(this.app.metadataCache.on("resolved", () => this.textSearchService.invalidateLinks()));
+
     for (const entry of SELECTION_ACTIONS) {
       this.addCommand({
         id: entry.id,
@@ -255,6 +293,15 @@ export default class ObsidianAIPlugin extends Plugin {
 
   onunload(): void {
     this.app.workspace.detachLeavesOfType(AI_CHAT_VIEW_TYPE);
+    this.app.workspace.detachLeavesOfType(HTML_PREVIEW_VIEW_TYPE);
+  }
+
+  async openHtmlPreview(file: TFile): Promise<void> {
+    const leaf = this.app.workspace.getLeavesOfType(HTML_PREVIEW_VIEW_TYPE)
+      .find((item) => item.view instanceof HtmlPreviewView && item.view.file?.path === file.path)
+      || this.app.workspace.getLeaf("tab");
+    await leaf.setViewState({ type: HTML_PREVIEW_VIEW_TYPE, state: { file: file.path }, active: true });
+    await this.app.workspace.revealLeaf(leaf);
   }
 
   async activateChatView(): Promise<void> {
@@ -614,7 +661,6 @@ export default class ObsidianAIPlugin extends Plugin {
       session.contextFilePath = this.getActiveContextFilePath();
     }
     this.settings.chatSessions.unshift(session);
-    this.settings.chatSessions = this.settings.chatSessions.slice(0, CHAT_SESSION_LIMIT);
     this.settings.activeChatSessionId = session.id;
     this.settings.activeContextScopeId = session.contextScopeId;
     await this.saveSettings();
@@ -740,6 +786,13 @@ export default class ObsidianAIPlugin extends Plugin {
     return active;
   }
 
+  async setChatSessionArchived(sessionId: string, archived: boolean): Promise<void> {
+    const session = this.settings.chatSessions.find((item) => item.id === sessionId);
+    if (!session) return;
+    session.archived = archived;
+    await this.saveSettings();
+  }
+
   async saveChatSessionMessages(sessionId: string, messages: StoredChatMessage[]): Promise<void> {
     const session = this.settings.chatSessions.find((item) => item.id === sessionId);
 
@@ -747,7 +800,7 @@ export default class ObsidianAIPlugin extends Plugin {
       return;
     }
 
-    session.messages = messages.slice(-CHAT_MESSAGE_LIMIT);
+    session.messages = messages.slice();
     session.updatedAt = new Date().toISOString();
 
     if (session.messages.length === 0) {
@@ -837,7 +890,10 @@ export default class ObsidianAIPlugin extends Plugin {
   }
 
   async saveSettings(): Promise<void> {
-    await this.saveData(this.settings);
+    const snapshot = JSON.parse(JSON.stringify(this.settings)) as ObsidianAISettings;
+    const save = this.settingsSaveQueue.then(() => this.saveData(snapshot));
+    this.settingsSaveQueue = save.catch(() => {});
+    await save;
     this.providerRegistry?.update(this.settings.providers);
     this.templateService?.update(this.settings.promptTemplates);
     this.refreshStatusBar();
@@ -999,12 +1055,12 @@ export default class ObsidianAIPlugin extends Plugin {
 function normalizeChatHistory(messages: StoredChatMessage[] | undefined): StoredChatMessage[] {
   return (messages || [])
     .filter((message) => (message.role === "user" || message.role === "assistant") && Boolean(message.content))
-    .slice(-CHAT_MESSAGE_LIMIT)
     .map((message) => ({
       role: message.role,
       content: message.content,
       citations: message.citations || [],
       selectionReferences: normalizeSelectionReferences(message.selectionReferences),
+      status: message.status === "error" || message.status === "stopped" ? message.status : "complete",
       createdAt: message.createdAt || new Date().toISOString()
     }));
 }
@@ -1031,6 +1087,7 @@ function normalizeChatSessions(
         contextMode: normalizeContextMode(session),
         contextFilePath: isContextFilePath(session.contextFilePath || "") ? session.contextFilePath : "",
         purpose: session.purpose || "",
+        archived: session.archived === true,
         autoContext: session.autoContext ?? true,
         lockedFilePaths: normalizeMarkdownPaths(session.lockedFilePaths || []),
         lastContextFilePaths: normalizeMarkdownPaths(session.lastContextFilePaths || []),
@@ -1040,8 +1097,7 @@ function normalizeChatSessions(
         updatedAt: session.updatedAt || messages[messages.length - 1]?.createdAt || createdAt
       };
     })
-    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
-    .slice(0, CHAT_SESSION_LIMIT);
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 }
 
 function createChatSessionRecord(
@@ -1062,7 +1118,7 @@ function createChatSessionRecord(
     lockedFilePaths: normalizeMarkdownPaths(config.lockedFilePaths || []),
     lastContextFilePaths: [],
     lastContextFingerprint: "",
-    messages: messages.slice(-CHAT_MESSAGE_LIMIT),
+    messages: messages.slice(),
     createdAt: messages[0]?.createdAt || now,
     updatedAt: messages[messages.length - 1]?.createdAt || now
   };

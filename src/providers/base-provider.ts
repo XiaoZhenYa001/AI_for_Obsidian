@@ -141,6 +141,7 @@ export abstract class BaseProvider implements AIProvider {
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
+      let hasContent = false;
       const separator = new RegExp(this.getEventSeparator());
 
       try {
@@ -148,6 +149,7 @@ export abstract class BaseProvider implements AIProvider {
           const { value, done } = await reader.read();
 
           if (done) {
+            buffer += decoder.decode();
             break;
           }
 
@@ -156,20 +158,15 @@ export abstract class BaseProvider implements AIProvider {
           buffer = parts.pop() || "";
 
           for (const eventText of parts) {
-            let event: ChatStreamEvent | "done" | undefined;
-
-            try {
-              event = this.parseStreamEvent(eventText);
-            } catch (parseError) {
-              console.warn("Skipping malformed stream event:", parseError);
-              continue;
-            }
+            const event = this.parseStreamEvent(eventText);
 
             if (event === "done") {
+              if (!hasContent) throw emptyResponse(this.config.name);
               return;
             }
 
             if (event) {
+              hasContent = hasContent || Boolean(event.content);
               yield event;
             }
           }
@@ -177,22 +174,28 @@ export abstract class BaseProvider implements AIProvider {
 
         // Process any residue remaining in the buffer after the loop.
         if (buffer.trim()) {
-          let event: ChatStreamEvent | "done" | undefined;
+          const event = this.parseStreamEvent(buffer);
 
-          try {
-            event = this.parseStreamEvent(buffer);
-          } catch (parseError) {
-            console.warn("Skipping malformed stream residue:", parseError);
+          if (event === "done") {
+            if (!hasContent) throw emptyResponse(this.config.name);
+            return;
           }
 
-          if (event && event !== "done") {
+          if (event) {
             yield event;
           }
         }
+
+        throw invalidResponse(this.config.name, "Response stream ended before its completion marker.");
       } finally {
+        // Also release the network body when the caller stops consuming early.
+        await reader.cancel().catch(() => undefined);
         reader.releaseLock();
       }
     } catch (error) {
+      if (error instanceof SyntaxError) {
+        throw invalidResponse(this.config.name, "Malformed response stream event.");
+      }
       throw normalizeProviderError(error, this.config.name);
     }
   }
