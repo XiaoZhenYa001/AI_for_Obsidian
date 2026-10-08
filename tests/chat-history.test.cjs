@@ -56,6 +56,17 @@ test('failed and stopped answers keep their status after reload and stay out of 
   assert.equal(history[0].content, 'message 5');
 });
 
+test('unwritten drawing previews expire on reload and stay out of provider history', async () => {
+  const preview = { ...message(1), drawing: { path: 'Board.excalidraw.md', state: 'preview' } };
+  const restored = toViewMessage(preview);
+  assert.equal(restored.drawing.state, 'expired');
+  assert.equal(toProviderHistory([restored]).length, 0);
+  const plugin = pluginWith([]);
+  plugin.loadData = async () => ({ chatSessions: [{ id: 'draw', messages: [preview] }] });
+  await plugin.loadSettings();
+  assert.equal(plugin.settings.chatSessions.find(session => session.id === 'draw').messages[0].drawing.state, 'expired');
+});
+
 test('settings saves cannot complete out of order and each write captures its own state', async () => {
   const plugin = new Plugin();
   plugin.settings = { value: 'first' };

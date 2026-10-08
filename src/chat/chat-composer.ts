@@ -10,6 +10,8 @@ export interface ChatComposerActions {
 export function createChatComposer(container: HTMLElement, actions: ChatComposerActions) {
   const composerEl = container.createDiv({ cls: "ai-second-brain-composer" });
   const referencesEl = composerEl.createDiv({ cls: "ai-second-brain-composer-references" });
+  const drawingContextEl = composerEl.createDiv({ cls: "ai-second-brain-drawing-context" });
+  drawingContextEl.hidden = true;
   const mainEl = composerEl.createDiv({ cls: "ai-second-brain-composer-main" });
   const inputEl = mainEl.createEl("textarea", {
     cls: "ai-second-brain-input",
@@ -26,5 +28,5 @@ export function createChatComposer(container: HTMLElement, actions: ChatComposer
   const stopButtonEl = createIconButton(actionsEl, "square", "停止", "ai-second-brain-stop");
   stopButtonEl.style.display = "none";
   stopButtonEl.addEventListener("click", actions.stop);
-  return { composerEl, referencesEl, inputEl, sendButtonEl, drawingButtonEl, stopButtonEl };
+  return { composerEl, referencesEl, drawingContextEl, inputEl, sendButtonEl, drawingButtonEl, stopButtonEl };
 }

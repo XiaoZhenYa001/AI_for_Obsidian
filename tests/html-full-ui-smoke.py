@@ -37,9 +37,21 @@ try:
             expect(frame.locator('body')).to_have_attribute('data-online','loaded')
             assert page.evaluate('fullFixture.stats()')['networkRequests'] > 0
             page.screenshot(path=str(out / 'html-full-preview.png'), full_page=True)
+            frame.locator('body').evaluate('(body, target)=>{ location.href=target; }', control + '/escaped')
+            page.wait_for_timeout(300)
+            assert page.evaluate('fullFixture.stats()')['navigationRequests'] == 0
+            page.get_by_role('button', name='刷新', exact=True).click()
+            expect(frame.locator('body')).to_have_attribute('data-module','42')
             page.get_by_role('button', name='源码', exact=True).click()
-            expect(page.get_by_role('textbox', name='HTML 源码（只读）')).to_contain_text('')
-            assert 'srcset=' in page.get_by_role('textbox', name='HTML 源码（只读）').input_value()
+            editor = page.get_by_role('textbox', name='HTML 源码')
+            expect(editor).to_be_visible()
+            assert 'srcset=' in editor.input_value()
+            editor.fill(editor.input_value().replace('完整 HTML 预览', '编辑保存成功'))
+            editor.press('Control+s')
+            expect(page.get_by_role('button', name='保存', exact=True)).to_be_disabled()
+            page.get_by_role('button', name='预览', exact=True).click()
+            expect(frame.get_by_role('heading', name='编辑保存成功')).to_be_visible()
+            expect(frame.locator('body')).to_have_attribute('data-module','42')
             page.evaluate('fullFixture.close()')
             assert page.evaluate('fullFixture.stats()')['active'] == 0
         finally:

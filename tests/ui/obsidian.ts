@@ -35,10 +35,13 @@ export class TFile {
   constructor(path: string) { this.path = path; this.name = path.split("/").pop()!; this.extension = path.split(".").pop()!; this.basename = this.name.replace(/\.[^.]+$/, ""); }
 }
 export class TFolder {}
+export class FileSystemAdapter { getBasePath() { return "fixture-vault"; } }
 export class ItemView extends Component {
   app: any; containerEl: HTMLElement; contentEl: HTMLElement;
   constructor(public leaf: any) {
     super(); this.app = leaf.app;
+    this.app.loadLocalStorage ??= (key: string) => JSON.parse(localStorage.getItem(key) || "null");
+    this.app.saveLocalStorage ??= (key: string, value: unknown) => value === null ? localStorage.removeItem(key) : localStorage.setItem(key, JSON.stringify(value));
     this.containerEl = document.createElement("section");
     this.containerEl.className = "fixture-view";
     this.containerEl.append(document.createElement("header"));
@@ -47,6 +50,7 @@ export class ItemView extends Component {
   }
 }
 export class FileView extends ItemView { file: TFile | null = null; }
+export class MarkdownView extends FileView {}
 export class Modal extends Component {
   modalEl: HTMLElement; contentEl: HTMLElement;
   constructor(public app: any) {
@@ -60,6 +64,39 @@ export class Modal extends Component {
 export class Notice {
   constructor(message: string) { const notice = document.createElement("div"); notice.className = "notice"; notice.textContent = message; document.body.append(notice); }
 }
+export class FuzzySuggestModal<T> extends Modal {
+  private placeholder = "";
+  setPlaceholder(value: string) { this.placeholder = value; }
+  getItems(): T[] { return []; }
+  getItemText(item: T): string { return String(item); }
+  onChooseItem(_item: T): void {}
+  onClose(): void {}
+  onOpen() {
+    const input = this.contentEl.createEl("input", { attr: { placeholder: this.placeholder, "aria-label": this.placeholder } });
+    const list = this.contentEl.createDiv();
+    const render = () => {
+      list.empty();
+      this.getItems().filter(item => this.getItemText(item).includes(input.value)).forEach(item => {
+        list.createEl("button", { text: this.getItemText(item) }).addEventListener("click", () => { this.close(); this.onChooseItem(item); });
+      });
+    };
+    input.addEventListener("input", render); render();
+  }
+}
+export class Menu {
+  private items: Array<{ title: string; click: () => void }> = [];
+  addSeparator() { return this; }
+  addItem(callback: (item: any) => void) {
+    const entry = { title: "", click() {} };
+    const item: any = { setTitle(value: string) { entry.title = value; return item; }, setIcon() { return item; }, setChecked() { return item; }, onClick(fn: () => void) { entry.click = fn; return item; } };
+    callback(item); this.items.push(entry); return this;
+  }
+  showAtMouseEvent() {
+    const menu = document.body.createDiv({ cls: "fixture-menu" });
+    this.items.forEach(item => menu.createEl("button", { text: item.title }).addEventListener("click", () => { menu.remove(); item.click(); }));
+  }
+}
+export const MarkdownRenderer = { async render(_app: any, source: string, element: HTMLElement) { element.setText(source); } };
 export class Setting {
   controlEl: HTMLElement;
   constructor(container: HTMLElement) {

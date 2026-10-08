@@ -5,7 +5,9 @@ const { startHtmlPreviewServer } = loadTs('src/html/html-preview-server.ts');
 const sessions = new Map();
 let nextId = 0;
 let networkRequests = 0;
+let navigationRequests = 0;
 let controlOrigin;
+let editedSource;
 const resources = new Map([
   ['site/style.css', 'body{font:18px system-ui;margin:24px;background:#f5f7fb}.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}.card{padding:20px;background:white;border-radius:12px}h1{color:rgb(12,100,180)}button{padding:10px}iframe{height:90px;border:1px solid #ddd}img{width:64px;height:64px}'],
   ['site/app.js', `import {answer} from './math.js'; const data=await (await fetch('./data.json')).json();document.body.dataset.module=String(answer+data.value);localStorage.setItem('preview-test','works');document.body.dataset.storage=localStorage.getItem('preview-test');document.body.dataset.eval=String(new Function('return 6*7')());document.querySelector('form').onsubmit=e=>{e.preventDefault();document.querySelector('#result').textContent='submitted'};try{parent.document.body.dataset.exposed='yes'}catch{document.body.dataset.parent='blocked'}document.body.dataset.node=typeof require;`],
@@ -18,17 +20,22 @@ const control = http.createServer(async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Cache-Control', 'no-store');
   if (req.url === '/online.js') { networkRequests++; res.setHeader('Content-Type', 'text/javascript'); res.end('document.body.dataset.online="loaded"'); return; }
+  if (req.url === '/escaped') { navigationRequests++; res.end('escaped'); return; }
   let body = ''; for await (const chunk of req) body += chunk;
   const data = body ? JSON.parse(body) : {};
   let result = {};
   if (req.url === '/new') {
     const server = await startHtmlPreviewServer({ filePath: 'site/index.html', allowNetwork: data.allowNetwork,
-      readFile: async path => { const value = path === 'site/index.html' ? source() : resources.get(path); return value === undefined ? undefined : { data: value }; } });
+      readFile: async path => { const value = path === 'site/index.html' ? (editedSource ?? source()) : resources.get(path); return value === undefined ? undefined : { data: value }; } });
     const id = String(++nextId); sessions.set(id, server); result = { id, url: server.url, origin: server.origin };
   } else if (req.url.startsWith('/network/')) sessions.get(req.url.split('/').pop()).setAllowNetwork(data.value);
   else if (req.url.startsWith('/close/')) { const id = req.url.split('/').pop(); await sessions.get(id)?.close(); sessions.delete(id); }
-  else if (req.url === '/source') result = { source: source() };
-  else if (req.url === '/stats') result = { active: sessions.size, networkRequests };
+  else if (req.url === '/source') result = { source: editedSource ?? source() };
+  else if (req.url === '/save') {
+    if ((editedSource ?? source()) !== data.base) { res.statusCode = 409; res.end('conflict'); return; }
+    editedSource = data.text; result = { source: editedSource };
+  }
+  else if (req.url === '/stats') result = { active: sessions.size, networkRequests, navigationRequests };
   else { res.statusCode = 404; }
   res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify(result));
 });

@@ -19,8 +19,17 @@ const resources = new Map<string, string>([
 ]);
 const files = new Map([...resources.keys()].map(path => [path, new (TFile as any)(path)]));
 const events = new Map<string, Set<(...args: any[]) => void>>();
+let reads = 0;
+let writes = 0;
+let ticks = 0;
+window.addEventListener("message", event => { if (event.data === "preview-tick") ticks++; });
 const app = { vault: {
-  read: async (file: TFile) => resources.get(file.path),
+  read: async (file: TFile) => { reads++; return resources.get(file.path); },
+  process: async (file: TFile, update: (source: string) => string) => {
+    const next = update(resources.get(file.path)!); resources.set(file.path, next); writes++;
+    events.get("modify")?.forEach(fn => fn(file)); return next;
+  },
+  create: async (path: string, source: string) => { resources.set(path, source); return new (TFile as any)(path); },
   readBinary: async (file: TFile) => new TextEncoder().encode(resources.get(file.path)).buffer,
   getAbstractFileByPath: (path: string) => files.get(path),
   on(event: string, callback: (...args: any[]) => void) {
@@ -29,9 +38,22 @@ const app = { vault: {
     return () => events.get(event)!.delete(callback);
   }
 } };
-const preview = new HtmlPreviewView({ app } as any);
+let preview = new HtmlPreviewView({ app } as any);
 (window as any).htmlFixture = {
   async open() { await preview.onOpen(); await preview.onLoadFile(files.get("demo/page.html")!); },
+  stats() { return { reads, writes, ticks }; },
+  source() { return resources.get("demo/page.html"); },
+  copies() { return [...resources].filter(([path]) => path.includes("-draft-")); },
+  recoveries() { return [...resources].filter(([path]) => path.includes("-recovery-")); },
+  failDraftStorage() { (app as any).saveLocalStorage = () => { throw new Error("quota"); }; },
+  failRecoveryWrite() { app.vault.create = async () => { throw new Error("disk full"); }; },
+  setSource(text: string) { resources.set("demo/page.html", text); events.get("modify")?.forEach(fn => fn(files.get("demo/page.html"))); },
+  hide() { preview.containerEl.style.display = "none"; },
+  show() { preview.containerEl.style.display = ""; },
+  async reopen() {
+    await preview.onUnloadFile(); await preview.onClose(); preview.unload(); preview.containerEl.remove();
+    preview = new HtmlPreviewView({ app } as any); await preview.onOpen(); await preview.onLoadFile(files.get("demo/page.html")!);
+  },
   changeStyle() {
     resources.set("demo/assets/style.css", '@import "../base.css"; #count {color:rgb(180, 20, 30);font-size:32px;}');
     events.get("modify")?.forEach(fn => fn(files.get("demo/assets/style.css")));

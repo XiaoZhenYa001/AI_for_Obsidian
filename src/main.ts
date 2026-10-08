@@ -35,7 +35,6 @@ import { createSelectionToolbarExtension } from "./ui/selection-toolbar";
 import { enhanceMermaidArtifacts, extractMermaidSources } from "./ui/mermaid-artifact";
 import { ModificationService } from "./modifications/modification-service";
 import { ExcalidrawEditService, isExcalidrawFile } from "./diagrams/excalidraw-edit-service";
-import { editDrawing } from "./diagrams/edit-drawing-modal";
 import { HTML_PREVIEW_VIEW_TYPE, HtmlPreviewView } from "./html/html-preview-view";
 import { HtmlFilePicker } from "./html/html-file-picker";
 import { startHtmlPreviewServer } from "./html/html-preview-server";
@@ -64,9 +63,15 @@ export default class ObsidianAIPlugin extends Plugin {
   modificationService!: ModificationService;
   excalidrawEditService!: ExcalidrawEditService;
   private lastMarkdownView?: MarkdownView;
+  private lastContextFile?: TFile;
   private statusBarEl?: HTMLElement;
   private readonly pendingSelectionReferences = new Map<string, SelectionReference[]>();
   private settingsSaveQueue: Promise<void> = Promise.resolve();
+  private providerSettingsKey?: string;
+  private templateSettingsKey?: string;
+  private contextSettingsKey?: string;
+  private statusBarRenderKey?: string;
+  private statusBarRefreshTimer?: ReturnType<typeof setTimeout>;
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -75,6 +80,8 @@ export default class ObsidianAIPlugin extends Plugin {
     this.contextScopeResolver = new ContextScopeResolver(this.app, () => this.getEditableMarkdownView()?.file || undefined);
     this.textSearchService = new TextSearchService(this.app);
     this.templateService = new TemplateService(this.settings.promptTemplates);
+    this.providerSettingsKey = JSON.stringify(this.settings.providers);
+    this.templateSettingsKey = JSON.stringify(this.settings.promptTemplates);
     this.knowledgeAnalysisService = new KnowledgeAnalysisService(this.app);
     this.chatService = new ChatService(this);
     this.contextScopeManager = new ContextScopeManager(this);
@@ -93,17 +100,23 @@ export default class ObsidianAIPlugin extends Plugin {
     });
 
     this.registerView(AI_CHAT_VIEW_TYPE, (leaf) => new AIChatView(leaf, this));
-    this.registerView(HTML_PREVIEW_VIEW_TYPE, (leaf) => new HtmlPreviewView(leaf, startHtmlPreviewServer));
-    try {
-      this.registerExtensions(["html", "htm"], HTML_PREVIEW_VIEW_TYPE);
-    } catch (error) {
-      console.info("HTML files already have a registered view; AI HTML preview remains available from the file menu.", error);
+    this.registerView(HTML_PREVIEW_VIEW_TYPE, (leaf) => new HtmlPreviewView(leaf, startHtmlPreviewServer, () => this.settings.enableHtmlPreview));
+    if (this.settings.enableHtmlPreview) {
+      try {
+        this.registerExtensions(["html", "htm"], HTML_PREVIEW_VIEW_TYPE);
+      } catch (error) {
+        console.info("HTML files already have a registered view; AI HTML preview remains available from the file menu.", error);
+      }
     }
     this.captureActiveMarkdownView();
+    this.lastContextFile = this.app.workspace.getActiveFile() || undefined;
     this.createStatusBarEntry();
+    this.contextSettingsKey = this.getContextSettingsKey();
 
     this.registerEvent(
       this.app.workspace.on("active-leaf-change", (leaf) => {
+        const file = (leaf?.view as { file?: TFile } | undefined)?.file;
+        if (file instanceof TFile) this.lastContextFile = file;
         if (leaf?.view instanceof MarkdownView) {
           this.lastMarkdownView = leaf.view;
         }
@@ -218,15 +231,15 @@ export default class ObsidianAIPlugin extends Plugin {
       name: "AI: Edit Excalidraw drawing",
       callback: () => {
         const file = this.app.workspace.getActiveFile();
-        void editDrawing(this, "", file && isExcalidrawFile(file, this.app) ? file : undefined);
+        void this.openDrawingChat(file && isExcalidrawFile(file, this.app) ? file : undefined);
       }
     });
     this.registerEvent(this.app.workspace.on("file-menu", (menu, file) => {
       if (file instanceof TFile && isExcalidrawFile(file, this.app)) {
         menu.addItem((item) => item.setTitle("AI 编辑画布内容").setIcon("pencil-ruler")
-          .onClick(() => { void editDrawing(this, "", file); }));
+          .onClick(() => { void this.openDrawingChat(file); }));
       }
-      if (file instanceof TFile && /\.html?$/i.test(file.path)) {
+      if (this.settings.enableHtmlPreview && file instanceof TFile && /\.html?$/i.test(file.path)) {
         menu.addItem((item) => item.setTitle("预览 HTML 页面").setIcon("app-window")
           .onClick(() => { void this.openHtmlPreview(file).catch((error: unknown) => new Notice(String(error))); }));
       }
@@ -234,11 +247,18 @@ export default class ObsidianAIPlugin extends Plugin {
     this.addCommand({
       id: "preview-html-file",
       name: "AI: Preview HTML file",
-      callback: () => new HtmlFilePicker(this.app, (file) => {
-        void this.openHtmlPreview(file).catch((error: unknown) => new Notice(String(error)));
-      }).open()
+      callback: () => {
+        if (!this.settings.enableHtmlPreview) { new Notice("请先在插件设置中开启「启用 HTML 原生预览」。"); return; }
+        new HtmlFilePicker(this.app, (file) => {
+          void this.openHtmlPreview(file).catch((error: unknown) => new Notice(String(error)));
+        }).open();
+      }
     });
     this.registerEvent(this.app.metadataCache.on("resolved", () => this.textSearchService.invalidateLinks()));
+    this.registerEvent(this.app.metadataCache.on("changed", () => {
+      // Tag membership changes only after metadata parsing has completed.
+      if (this.getActiveContextScope()?.mode === "tags") this.scheduleStatusBarRefresh();
+    }));
 
     for (const entry of SELECTION_ACTIONS) {
       this.addCommand({
@@ -253,7 +273,7 @@ export default class ObsidianAIPlugin extends Plugin {
     this.registerEvent(
       this.app.vault.on("create", (file) => {
         if (isContextFile(file)) {
-          this.refreshStatusBar();
+          this.scheduleStatusBarRefresh();
         }
       })
     );
@@ -262,7 +282,6 @@ export default class ObsidianAIPlugin extends Plugin {
       this.app.vault.on("modify", (file) => {
         if (isContextFile(file)) {
           this.textSearchService.invalidateFile(file.path);
-          this.refreshStatusBar();
         }
       })
     );
@@ -271,7 +290,7 @@ export default class ObsidianAIPlugin extends Plugin {
       this.app.vault.on("delete", (file) => {
         if (isContextFile(file)) {
           this.textSearchService.invalidateFile(file.path);
-          this.refreshStatusBar();
+          this.scheduleStatusBarRefresh();
         }
       })
     );
@@ -284,7 +303,7 @@ export default class ObsidianAIPlugin extends Plugin {
         if (isContextFile(file)) {
           this.textSearchService.invalidateFile(file.path);
         }
-        this.refreshStatusBar();
+        this.scheduleStatusBarRefresh();
       })
     );
 
@@ -292,16 +311,25 @@ export default class ObsidianAIPlugin extends Plugin {
   }
 
   onunload(): void {
+    if (this.statusBarRefreshTimer !== undefined) clearTimeout(this.statusBarRefreshTimer);
+    this.statusBarRefreshTimer = undefined;
     this.app.workspace.detachLeavesOfType(AI_CHAT_VIEW_TYPE);
     this.app.workspace.detachLeavesOfType(HTML_PREVIEW_VIEW_TYPE);
   }
 
   async openHtmlPreview(file: TFile): Promise<void> {
+    if (!this.settings.enableHtmlPreview) throw new Error("请先在插件设置中开启「启用 HTML 原生预览」。");
     const leaf = this.app.workspace.getLeavesOfType(HTML_PREVIEW_VIEW_TYPE)
       .find((item) => item.view instanceof HtmlPreviewView && item.view.file?.path === file.path)
       || this.app.workspace.getLeaf("tab");
     await leaf.setViewState({ type: HTML_PREVIEW_VIEW_TYPE, state: { file: file.path }, active: true });
     await this.app.workspace.revealLeaf(leaf);
+  }
+
+  async setHtmlPreviewEnabled(enabled: boolean): Promise<void> {
+    this.settings.enableHtmlPreview = enabled;
+    if (!enabled) this.app.workspace.detachLeavesOfType(HTML_PREVIEW_VIEW_TYPE);
+    await this.saveSettings();
   }
 
   async activateChatView(): Promise<void> {
@@ -326,6 +354,17 @@ export default class ObsidianAIPlugin extends Plugin {
     }
 
     this.app.workspace.revealLeaf(leaf);
+  }
+
+  private async openDrawingChat(file?: TFile): Promise<void> {
+    await this.activateChatView();
+    const view = this.app.workspace.getLeavesOfType(AI_CHAT_VIEW_TYPE)[0]?.view;
+    if (view instanceof AIChatView) await view.startDrawingEdit(file);
+  }
+
+  getCurrentDrawingFile(): TFile | undefined {
+    const file = this.app.workspace.getActiveFile() || this.lastContextFile;
+    return file && isExcalidrawFile(file, this.app) && this.app.vault.getAbstractFileByPath(file.path) === file ? file : undefined;
   }
 
   private async undoLastModificationBatch(): Promise<void> {
@@ -532,7 +571,6 @@ export default class ObsidianAIPlugin extends Plugin {
     session.lastContextFingerprint = "";
     session.updatedAt = new Date().toISOString();
     await this.saveSettings();
-    this.refreshChatViews();
   }
 
   addSelectionReferences(references: SelectionReference[]): void {
@@ -885,6 +923,7 @@ export default class ObsidianAIPlugin extends Plugin {
       diagramFolder: saved?.diagramFolder || DEFAULT_SETTINGS.diagramFolder,
       diagramMaxNodes: clampDiagramMaxNodes(saved?.diagramMaxNodes),
       diagramAutoEmbed: saved?.diagramAutoEmbed ?? DEFAULT_SETTINGS.diagramAutoEmbed,
+      enableHtmlPreview: saved?.enableHtmlPreview === true,
       lastModificationSnapshot: saved?.lastModificationSnapshot
     };
   }
@@ -894,13 +933,53 @@ export default class ObsidianAIPlugin extends Plugin {
     const save = this.settingsSaveQueue.then(() => this.saveData(snapshot));
     this.settingsSaveQueue = save.catch(() => {});
     await save;
-    this.providerRegistry?.update(this.settings.providers);
-    this.templateService?.update(this.settings.promptTemplates);
-    this.refreshStatusBar();
-    this.refreshChatViews();
+    // History saves should not rebuild providers or re-scan context files. Read
+    // current state here so a slower queued save cannot restore old UI settings.
+    const providerKey = JSON.stringify(this.settings.providers);
+    const providersChanged = providerKey !== this.providerSettingsKey;
+    if (providersChanged && this.providerRegistry) {
+      this.providerRegistry.update(this.settings.providers);
+      this.providerSettingsKey = providerKey;
+    }
+    const templateKey = JSON.stringify(this.settings.promptTemplates);
+    if (templateKey !== this.templateSettingsKey && this.templateService) {
+      this.templateService.update(this.settings.promptTemplates);
+      this.templateSettingsKey = templateKey;
+    }
+    const contextKey = this.getContextSettingsKey();
+    if (contextKey !== this.contextSettingsKey) {
+      this.contextSettingsKey = contextKey;
+      this.refreshStatusBar();
+      this.refreshChatViews();
+    } else if (providersChanged) {
+      this.refreshStatusBar();
+    }
   }
 
   // --- Private ---
+
+  private getContextSettingsKey(): string {
+    const session = this.settings.chatSessions?.find((item) => item.id === this.settings.activeChatSessionId);
+    return JSON.stringify([
+      this.settings.defaultChatProviderId,
+      this.settings.activeContextScopeId,
+      this.settings.autoRecognizeActiveFile,
+      this.settings.contextScopes,
+      this.settings.activeChatSessionId,
+      session?.contextMode,
+      session?.contextScopeId,
+      session?.contextScopeOverride,
+      session?.contextFilePath
+    ]);
+  }
+
+  private scheduleStatusBarRefresh(): void {
+    if (this.statusBarRefreshTimer !== undefined) return;
+    this.statusBarRefreshTimer = setTimeout(() => {
+      this.statusBarRefreshTimer = undefined;
+      this.refreshStatusBar();
+    }, 100);
+  }
 
   private captureActiveMarkdownView(): void {
     const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
@@ -911,6 +990,7 @@ export default class ObsidianAIPlugin extends Plugin {
   }
 
   private createStatusBarEntry(): void {
+    this.statusBarRenderKey = undefined;
     this.statusBarEl = this.addStatusBarItem();
     this.statusBarEl.addClass("ai-second-brain-status");
     const button = this.statusBarEl.createEl("button", {
@@ -924,14 +1004,13 @@ export default class ObsidianAIPlugin extends Plugin {
   }
 
   private refreshStatusBar(): void {
+    if (this.statusBarRefreshTimer !== undefined) clearTimeout(this.statusBarRefreshTimer);
+    this.statusBarRefreshTimer = undefined;
     const button = this.statusBarEl?.querySelector<HTMLButtonElement>(".ai-second-brain-status-button");
     if (!button || !this.providerRegistry || !this.contextScopeResolver) {
       return;
     }
 
-    button.empty();
-    const icon = button.createSpan({ cls: "ai-second-brain-status-icon" });
-    setIcon(icon, "brain-circuit");
     const provider =
       this.providerRegistry.get(this.settings.defaultChatProviderId) ||
       this.providerRegistry.getFirstAvailable();
@@ -942,12 +1021,22 @@ export default class ObsidianAIPlugin extends Plugin {
     const contextLabel = session.contextMode === "manual"
       ? scope?.name || "无上下文"
       : contextFiles[0]?.name || "无上下文";
-    const label = button.createSpan({ cls: "ai-second-brain-status-label" });
-    label.setText(provider ? `${contextLabel} · ${fileCount}` : "AI 未配置");
-    button.toggleClass("is-unavailable", !provider);
-    button.title = provider
+    const text = provider ? `${contextLabel} · ${fileCount}` : "AI 未配置";
+    const title = provider
       ? `聊天服务：${provider.config.name}\n上下文：${contextLabel}\n授权文件：${fileCount}\n点击打开 AI`
       : "尚未配置可用的 AI 服务商，点击打开 AI";
+    const renderKey = JSON.stringify([text, title, Boolean(provider)]);
+    if (renderKey === this.statusBarRenderKey) return;
+    this.statusBarRenderKey = renderKey;
+    let label = button.querySelector<HTMLElement>(".ai-second-brain-status-label");
+    if (!label) {
+      const icon = button.createSpan({ cls: "ai-second-brain-status-icon" });
+      setIcon(icon, "brain-circuit");
+      label = button.createSpan({ cls: "ai-second-brain-status-label" });
+    }
+    label.setText(text);
+    button.toggleClass("is-unavailable", !provider);
+    button.title = title;
   }
 
   private createSelfCheckItems(): SelfCheckItem[] {
@@ -1061,6 +1150,8 @@ function normalizeChatHistory(messages: StoredChatMessage[] | undefined): Stored
       citations: message.citations || [],
       selectionReferences: normalizeSelectionReferences(message.selectionReferences),
       status: message.status === "error" || message.status === "stopped" ? message.status : "complete",
+      drawing: message.drawing && typeof message.drawing.path === "string" && ["preview", "applied", "discarded", "expired", "undone"].includes(message.drawing.state)
+        ? { path: message.drawing.path, state: message.drawing.state === "preview" ? "expired" : message.drawing.state } : undefined,
       createdAt: message.createdAt || new Date().toISOString()
     }));
 }

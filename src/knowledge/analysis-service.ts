@@ -10,6 +10,7 @@ import {
 } from "./types";
 
 export class KnowledgeAnalysisService {
+  private pendingReports = new Map<string, Promise<KnowledgeHealthReport>>();
   private cachedReport?: {
     signature: string;
     report: KnowledgeHealthReport;
@@ -23,37 +24,51 @@ export class KnowledgeAnalysisService {
       return this.cachedReport.report;
     }
 
+    const pending = this.pendingReports.get(signature);
+    if (pending) return pending;
+    const task = this.buildReport(scopeName, files, signature);
+    this.pendingReports.set(signature, task);
+    try { return await task; }
+    finally { if (this.pendingReports.get(signature) === task) this.pendingReports.delete(signature); }
+  }
+
+  private async buildReport(scopeName: string, files: TFile[], signature: string): Promise<KnowledgeHealthReport> {
     const pathSet = new Set(files.map((file) => file.path));
     const incomingMap = this.buildIncomingLinkMap(pathSet);
-    const contents = await Promise.all(files.map((file) => this.app.vault.cachedRead(file)));
-    const contentCache = new Map(files.map((file, index) => [file.path, contents[index].toLowerCase()]));
+    const contentCache = new Map<string, string>();
     const notes: KnowledgeNote[] = [];
 
-    for (let i = 0; i < files.length; i++) {
-      const file = files[i];
-      const content = contents[i];
-      const cache = this.app.metadataCache.getFileCache(file);
-      const outgoingLinks = Object.keys(this.app.metadataCache.resolvedLinks[file.path] || {}).filter((path) =>
-        pathSet.has(path)
-      );
-      const tags = [
-        ...(cache?.tags?.map((tag) => tag.tag.replace(/^#/, "")) || []),
-        ...readFrontmatterTags(cache?.frontmatter?.tags)
-      ];
+    for (let offset = 0; offset < files.length; offset += 8) {
+      const batch = files.slice(offset, offset + 8);
+      const contents = await Promise.all(batch.map(file => this.app.vault.cachedRead(file)));
+      for (let i = 0; i < batch.length; i++) {
+        const file = batch[i];
+        const content = contents[i];
+        contentCache.set(file.path, content.toLowerCase());
+        const cache = this.app.metadataCache.getFileCache(file);
+        const outgoingLinks = Object.keys(this.app.metadataCache.resolvedLinks[file.path] || {}).filter((path) =>
+          pathSet.has(path)
+        );
+        const tags = [
+          ...(cache?.tags?.map((tag) => tag.tag.replace(/^#/, "")) || []),
+          ...readFrontmatterTags(cache?.frontmatter?.tags)
+        ];
 
-      notes.push({
-        path: file.path,
-        title: readTitle(file, cache?.frontmatter?.title),
-        folder: readFolder(file.path),
-        tags: unique(tags),
-        outgoingLinks,
-        incomingLinks: incomingMap.get(file.path) || [],
-        wordCount: countWords(content),
-        modifiedTime: file.stat.mtime,
-        excerpt: createNoteExcerpt(content),
-        hasFrontmatter: Boolean(cache?.frontmatter),
-        hasSummary: hasSummary(content, cache?.frontmatter)
-      });
+        notes.push({
+          path: file.path,
+          title: readTitle(file, cache?.frontmatter?.title),
+          folder: readFolder(file.path),
+          tags: unique(tags),
+          outgoingLinks,
+          incomingLinks: incomingMap.get(file.path) || [],
+          wordCount: countWords(content),
+          modifiedTime: file.stat.mtime,
+          excerpt: createNoteExcerpt(content),
+          hasFrontmatter: Boolean(cache?.frontmatter),
+          hasSummary: hasSummary(content, cache?.frontmatter)
+        });
+      }
+      if (offset + 8 < files.length) await new Promise<void>(resolve => setTimeout(resolve, 0));
     }
 
     const report: KnowledgeHealthReport = {
@@ -67,7 +82,7 @@ export class KnowledgeAnalysisService {
       linkSuggestions: await this.findLinkSuggestions(notes, pathSet, contentCache),
       tagStats: buildTagStats(notes)
     };
-    this.cachedReport = { signature, report };
+    if (signature === createAnalysisSignature(scopeName, files)) this.cachedReport = { signature, report };
     return report;
   }
 
@@ -243,7 +258,9 @@ export class KnowledgeAnalysisService {
     contentCache: Map<string, string>
   ): Promise<LinkSuggestion[]> {
     const suggestions: LinkSuggestion[] = [];
-    const notesByPath = new Map(notes.map((note) => [note.path, note]));
+    const targets = notes.map(note => ({ note, title: note.title.toLowerCase(), basename: readBasename(note.path).toLowerCase() }));
+    let deadline = performance.now() + 8;
+    let comparisons = 0;
 
     for (const source of notes) {
       let content = contentCache.get(source.path);
@@ -260,30 +277,38 @@ export class KnowledgeAnalysisService {
       }
 
       const linked = new Set([...source.outgoingLinks, source.path]);
+      const sourceTags = new Set(source.tags);
 
-      for (const target of notes) {
+      for (const { note: target, title, basename } of targets) {
+        if (++comparisons % 128 === 0 && performance.now() >= deadline) {
+          await new Promise<void>(resolve => setTimeout(resolve, 0));
+          deadline = performance.now() + 8;
+        }
         if (linked.has(target.path) || !pathSet.has(target.path)) {
           continue;
         }
 
-        const sharedTags = target.tags.filter((tag) => source.tags.includes(tag));
-        const titleMentioned = target.title.length >= 2 && content.includes(target.title.toLowerCase());
-        const basenameMentioned = content.includes(readBasename(target.path).toLowerCase());
+        const sharedTags = target.tags.filter((tag) => sourceTags.has(tag));
+        const titleMentioned = target.title.length >= 2 && content.includes(title);
+        const basenameMentioned = content.includes(basename);
 
         if (!titleMentioned && !basenameMentioned && sharedTags.length < 2) {
           continue;
         }
 
         const score = (titleMentioned ? 5 : 0) + (basenameMentioned ? 3 : 0) + sharedTags.length;
-        const targetNote = notesByPath.get(target.path);
+        // Keep only the displayed top 50; dense libraries must not retain O(n²) suggestions.
+        if (suggestions.length === 50 && score <= suggestions[49].score) continue;
 
         suggestions.push({
           sourcePath: source.path,
           targetPath: target.path,
-          targetTitle: targetNote?.title || target.title,
+          targetTitle: target.title,
           reason: titleMentioned || basenameMentioned ? "正文提到了目标笔记标题" : `共享标签：${sharedTags.join(", ")}`,
           score
         });
+        suggestions.sort((a, b) => b.score - a.score);
+        if (suggestions.length > 50) suggestions.pop();
       }
     }
 

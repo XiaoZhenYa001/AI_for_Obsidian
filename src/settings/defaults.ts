@@ -13,6 +13,7 @@ export const DEFAULT_SETTINGS: ObsidianAISettings = {
   diagramFolder: "AI Second Brain/Diagrams",
   diagramMaxNodes: 24,
   diagramAutoEmbed: true,
+  enableHtmlPreview: false,
   contextScopes: [
     {
       id: "current-file",

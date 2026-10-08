@@ -93,3 +93,114 @@ test("a search batch scans the link graph once and reuses it until links change"
   assert.deepEqual(Array.from(updated[1].incomingLinks || []), []);
   assert.deepEqual(Array.from(updated[2].incomingLinks || []), [files[0].path]);
 });
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+
+test("overlapping searches and representative reads share one pending file read", async () => {
+  const file = note("Shared.md");
+  const read = deferred();
+  const app = createApp();
+  let reads = 0;
+  app.vault.cachedRead = () => { reads += 1; return read.promise; };
+  const service = new TextSearchService(app);
+  const searches = [service.search("apple", [file]), service.search("apple", [file]), service.getRepresentativeChunks([file])];
+  assert.equal(reads, 1);
+  read.resolve(file.content);
+  for (const results of await Promise.all(searches)) assert.equal(results[0].content, "apple");
+  await service.search("apple", [file]);
+  assert.equal(reads, 1, "a warm search needs no additional file IO");
+});
+
+test("an invalidated read cannot replace newer content or leave stale postings", async () => {
+  const file = note("Changing.md", "obsolete");
+  const reads = [deferred(), deferred()];
+  let readCount = 0;
+  const app = createApp();
+  app.vault.cachedRead = () => reads[readCount++].promise;
+  const service = new TextSearchService(app);
+  const oldSearch = service.search("obsolete", [file]);
+  service.invalidateFile(file.path);
+  file.content = "fresh";
+  file.stat.mtime += 1;
+  file.stat.size = file.content.length;
+  const freshSearch = service.search("fresh", [file]);
+  reads[1].resolve(file.content);
+  assert.equal((await freshSearch)[0].content, "fresh");
+  reads[0].resolve("obsolete");
+  await oldSearch;
+  const latest = await service.search("obsolete", [file]);
+  assert.equal(latest[0].content, "fresh");
+  assert.equal(latest[0].score, 0.1, "obsolete postings must not score a replacement chunk");
+  assert.equal(readCount, 2);
+});
+
+test("a changed stat without an invalidation event cannot label old bytes as current", async () => {
+  const file = note("Changing.md", "obsolete");
+  const read = deferred();
+  const app = createApp();
+  app.vault.cachedRead = () => read.promise;
+  const service = new TextSearchService(app);
+  const search = service.search("obsolete", [file]);
+  file.stat.mtime += 1;
+  read.resolve("obsolete");
+  assert.equal((await search).length, 0);
+  assert.equal(service.getStats().indexedFiles, 0);
+  app.vault.cachedRead = async () => "fresh";
+  assert.equal((await service.search("fresh", [file]))[0].content, "fresh");
+});
+
+test("clearing an index cancels publication and remaining batches of an earlier rebuild", async () => {
+  const read = deferred();
+  const files = Array.from({ length: 24 }, (_, index) => note(`Note${index}.md`));
+  const app = createApp();
+  let readCount = 0;
+  app.vault.cachedRead = () => { readCount += 1; return read.promise; };
+  const service = new TextSearchService(app);
+  const rebuild = service.rebuild(files);
+  const startedReads = readCount;
+  service.clear();
+  read.resolve("apple");
+  await rebuild;
+  assert.equal(service.getStats().indexedFiles, 0);
+  assert.equal(service.getStats().lastRebuildAt, undefined);
+  assert.equal(readCount, startedReads, "cancelled batches must not continue reading the vault");
+  assert.ok(readCount < files.length);
+});
+
+test("a failed shared read is retried by the next search", async () => {
+  const file = note("Retry.md");
+  const read = deferred();
+  const app = createApp();
+  let readCount = 0;
+  app.vault.cachedRead = () => { readCount += 1; return read.promise; };
+  const service = new TextSearchService(app);
+  const searches = Promise.allSettled([service.search("apple", [file]), service.search("apple", [file])]);
+  read.reject(new Error("temporary read error"));
+  assert.ok((await searches).every(result => result.status === "rejected"));
+  assert.equal(readCount, 1);
+  app.vault.cachedRead = async () => file.content;
+  assert.equal((await service.search("apple", [file]))[0].content, "apple");
+});
+
+test("a cold multi-file index yields to queued UI work, with no periodic work after completion", async () => {
+  let time = 0;
+  let timers = 0;
+  const { TextSearchService: BudgetedSearch } = loadTs("src/retrieval/text-search.ts", {}, {
+    performance: { now: () => (time += 10) },
+    setTimeout: (callback, delay) => { timers += 1; return setTimeout(callback, delay); }
+  });
+  const service = new BudgetedSearch(createApp());
+  let uiWorkRan = false;
+  setTimeout(() => { uiWorkRan = true; }, 0);
+  await service.search("apple", Array.from({ length: 32 }, (_, index) => note(`Note${index}.md`)));
+  assert.equal(uiWorkRan, true, "a busy index must let the host process queued UI work");
+  const completedTimers = timers;
+  assert.ok(completedTimers > 0);
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(timers, completedTimers, "an idle index has no background timer");
+});

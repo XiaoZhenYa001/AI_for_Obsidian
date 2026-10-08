@@ -9,6 +9,7 @@ const SCORE_HEADING_MATCH = 3;
 const SCORE_CONTENT_MAX = 5;
 const MAX_CANDIDATE_CHUNKS = 1600;
 const INDEX_BATCH_SIZE = 8;
+const INDEX_WORK_BUDGET_MS = 8;
 
 type IndexedFile = {
   path: string;
@@ -16,6 +17,13 @@ type IndexedFile = {
   size: number;
   chunks: NoteChunk[];
   termChunkIds: Map<string, Set<string>>;
+};
+
+type PendingIndex = {
+  path: string;
+  mtime: number;
+  size: number;
+  promise: Promise<IndexedFile | undefined>;
 };
 
 export type TextIndexStats = {
@@ -34,24 +42,25 @@ export class TextSearchService {
   private index = new Map<string, IndexedFile>();
   private chunksById = new Map<string, NoteChunk>();
   private postings = new Map<string, Set<string>>();
+  private pendingIndexes = new Map<string, PendingIndex>();
+  private indexGeneration = 0;
   private incomingLinksByTarget?: Map<string, string[]>;
   private lastRebuildAt?: string;
 
   constructor(private readonly app: App) {}
 
   async rebuild(files: TFile[]): Promise<TextIndexStats> {
-    this.index.clear();
-    this.chunksById.clear();
-    this.postings.clear();
-    this.invalidateLinks();
+    this.clear();
+    const generation = this.indexGeneration;
 
-    await this.ensureFilesIndexed(files, true);
+    await this.ensureFilesIndexed(files);
 
-    this.lastRebuildAt = new Date().toISOString();
+    if (generation === this.indexGeneration) this.lastRebuildAt = new Date().toISOString();
     return this.getStats();
   }
 
   invalidateFile(path: string): void {
+    this.pendingIndexes.delete(path);
     this.removeIndexedFile(path);
     this.invalidateLinks();
   }
@@ -61,6 +70,8 @@ export class TextSearchService {
   }
 
   clear(): void {
+    this.indexGeneration += 1;
+    this.pendingIndexes.clear();
     this.index.clear();
     this.chunksById.clear();
     this.postings.clear();
@@ -196,50 +207,90 @@ export class TextSearchService {
     return results;
   }
 
-  private async ensureIndexed(file: TFile): Promise<IndexedFile> {
+  private async ensureIndexed(file: TFile): Promise<IndexedFile | undefined> {
     const existing = this.index.get(file.path);
 
     if (existing && existing.mtime === file.stat.mtime && existing.size === file.stat.size) {
       return existing;
     }
 
-    return this.indexFile(file);
+    const pending = this.pendingIndexes.get(file.path);
+    if (pending && pending.mtime === file.stat.mtime && pending.size === file.stat.size) {
+      return pending.promise;
+    }
+
+    const task: PendingIndex = {
+      path: file.path,
+      mtime: file.stat.mtime,
+      size: file.stat.size,
+      promise: Promise.resolve(undefined)
+    };
+    this.pendingIndexes.set(task.path, task);
+    task.promise = this.indexFile(file, task).finally(() => {
+      if (this.pendingIndexes.get(task.path) === task) this.pendingIndexes.delete(task.path);
+    });
+    return task.promise;
   }
 
-  private async ensureFilesIndexed(files: TFile[], force = false): Promise<void> {
+  private async ensureFilesIndexed(files: TFile[]): Promise<void> {
+    const generation = this.indexGeneration;
+    let yieldedAt = performance.now();
     for (let index = 0; index < files.length; index += INDEX_BATCH_SIZE) {
+      if (generation !== this.indexGeneration) return;
       const batch = files.slice(index, index + INDEX_BATCH_SIZE);
-      await Promise.all(batch.map((file) => force ? this.indexFile(file) : this.ensureIndexed(file)));
+      await Promise.all(batch.map((file) => this.ensureIndexed(file)));
+      if (index + INDEX_BATCH_SIZE < files.length && performance.now() - yieldedAt >= INDEX_WORK_BUDGET_MS) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        yieldedAt = performance.now();
+      }
     }
   }
 
-  private async indexFile(file: TFile): Promise<IndexedFile> {
-    this.removeIndexedFile(file.path);
+  private async indexFile(file: TFile, task: PendingIndex): Promise<IndexedFile | undefined> {
+    this.removeIndexedFile(task.path);
     const rawContent = await this.app.vault.cachedRead(file);
-    const prepared = prepareContextDocument(file.path, rawContent);
-    const chunks = chunkMarkdown(file.path, prepared.content, undefined, prepared.semanticContext);
+    if (!this.isCurrentIndexTask(file, task)) return undefined;
+    const prepared = prepareContextDocument(task.path, rawContent);
+    const chunks = chunkMarkdown(task.path, prepared.content, undefined, prepared.semanticContext);
     const termChunkIds = new Map<string, Set<string>>();
+    let yieldedAt = performance.now();
+    let processed = 0;
     for (const chunk of chunks) {
-      this.chunksById.set(chunk.id, chunk);
       for (const term of extractIndexTerms(`${chunk.filePath}\n${chunk.heading || ""}\n${chunk.semanticContext || ""}\n${chunk.content}`)) {
-        const ids = this.postings.get(term) || new Set<string>();
-        ids.add(chunk.id);
-        this.postings.set(term, ids);
         const fileIds = termChunkIds.get(term) || new Set<string>();
         fileIds.add(chunk.id);
         termChunkIds.set(term, fileIds);
       }
+      if (++processed % 32 === 0 && performance.now() - yieldedAt >= INDEX_WORK_BUDGET_MS) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        if (!this.isCurrentIndexTask(file, task)) return undefined;
+        yieldedAt = performance.now();
+      }
+    }
+    // Publish together only while this read still belongs to the current file version.
+    if (!this.isCurrentIndexTask(file, task)) return undefined;
+    this.removeIndexedFile(task.path);
+    for (const chunk of chunks) this.chunksById.set(chunk.id, chunk);
+    for (const [term, fileIds] of termChunkIds) {
+      const ids = this.postings.get(term) || new Set<string>();
+      for (const id of fileIds) ids.add(id);
+      this.postings.set(term, ids);
     }
     const indexedFile: IndexedFile = {
-      path: file.path,
-      mtime: file.stat.mtime,
-      size: file.stat.size,
+      path: task.path,
+      mtime: task.mtime,
+      size: task.size,
       chunks,
       termChunkIds
     };
 
-    this.index.set(file.path, indexedFile);
+    this.index.set(task.path, indexedFile);
     return indexedFile;
+  }
+
+  private isCurrentIndexTask(file: TFile, task: PendingIndex): boolean {
+    return this.pendingIndexes.get(task.path) === task && file.path === task.path &&
+      file.stat.mtime === task.mtime && file.stat.size === task.size;
   }
 
   private removeIndexedFile(path: string): void {
@@ -303,8 +354,8 @@ function scoreChunk(
       score += SCORE_HEADING_MATCH;
     }
 
-    score += Math.min(countOccurrences(normalizedContent, term), SCORE_CONTENT_MAX);
-    score += Math.min(countOccurrences(normalizedSemantics, term), 3);
+    score += countOccurrences(normalizedContent, term, SCORE_CONTENT_MAX);
+    score += countOccurrences(normalizedSemantics, term, 3);
   }
 
   return score;
@@ -353,7 +404,7 @@ function extractIndexTerms(value: string): Set<string> {
   return terms;
 }
 
-function countOccurrences(value: string, term: string): number {
+function countOccurrences(value: string, term: string, limit: number): number {
   if (!term) {
     return 0;
   }
@@ -363,6 +414,7 @@ function countOccurrences(value: string, term: string): number {
 
   while (index !== -1) {
     count += 1;
+    if (count >= limit) return count;
     index = value.indexOf(term, index + term.length);
   }
 

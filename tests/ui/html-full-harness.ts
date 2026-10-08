@@ -16,6 +16,10 @@ const factory: HtmlPreviewServerFactory = async (options) => {
 };
 const app = { vault: {
   read: async () => (await request("/source")).source,
+  process: async (_file: TFile, update: (source: string) => string) => {
+    const base = (await request("/source")).source;
+    return (await request("/save", { base, text: update(base) })).source;
+  },
   getAbstractFileByPath: () => file,
   on: () => () => {}
 } };

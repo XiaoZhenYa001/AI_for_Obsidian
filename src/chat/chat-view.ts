@@ -18,9 +18,10 @@ import { buildFolderAnalysisInstruction, detectFolderAnalysisIntent } from "./fo
 import { ModificationPlanModal } from "../modifications/modification-plan-modal";
 import { ChatSessionManagerModal } from "./chat-session-manager-modal";
 import { normalizeMermaidMarkdown } from "../utils/mermaid";
-import { editDrawing } from "../diagrams/edit-drawing-modal";
-import { isExcalidrawFile } from "../diagrams/excalidraw-edit-service";
-import { isDrawingEditRequest } from "../diagrams/drawing-edit-plan";
+import { DrawingSnapshot, DrawingWriteReceipt, isExcalidrawFile } from "../diagrams/excalidraw-edit-service";
+import { DrawingEditPlan, isDrawingEditRequest } from "../diagrams/drawing-edit-plan";
+import { pickDrawingFile } from "../diagrams/drawing-file-picker";
+import { formatDrawingPreview } from "../diagrams/drawing-chat";
 import { extractHtmlDocument, saveHtmlArtifact } from "../html/html-artifact";
 import { createChatComposer } from "./chat-composer";
 
@@ -49,13 +50,19 @@ export class AIChatView extends ItemView {
   private expandedCitationListKeys = new Set<string>();
   private citationFreshnessCache = new Map<string, boolean>();
   private messageRenderComponents: Component[] = [];
-  private streamingRenderComponent?: Component;
   private streamingRenderTimer?: number;
   private pendingStreamingMessage?: ViewChatMessage;
-  private streamingRenderVersion = 0;
+  private viewVisible = true;
+  private pendingFullRender = false;
+  private pendingFollowOutput = true;
   private sessionDrafts = new Map<string, string>();
   private visibleMessageCount = 60;
   private closed = false;
+  private drawingContextEl?: HTMLElement;
+  private drawingButtonEl?: HTMLButtonElement;
+  private drawingTarget?: TFile;
+  private pendingDrawing?: { message: ViewChatMessage; snapshot: DrawingSnapshot; plan: DrawingEditPlan };
+  private readonly drawingReceipts = new Map<ViewChatMessage, DrawingWriteReceipt>();
 
   constructor(leaf: WorkspaceLeaf, private readonly plugin: ObsidianAIPlugin) {
     super(leaf);
@@ -170,6 +177,8 @@ export class AIChatView extends ItemView {
     this.inputEl = composer.inputEl;
     this.sendButtonEl = composer.sendButtonEl;
     this.stopButtonEl = composer.stopButtonEl;
+    this.drawingContextEl = composer.drawingContextEl;
+    this.drawingButtonEl = composer.drawingButtonEl;
 
     const ownerWindow = this.containerEl.ownerDocument.defaultView;
     const handleComposerShortcut = (event: KeyboardEvent): void => {
@@ -189,12 +198,20 @@ export class AIChatView extends ItemView {
       this.registerDomEvent(ownerWindow, "keydown", handleComposerShortcut, { capture: true });
     }
     this.renderPendingSelectionReferences();
+    const visibility = new IntersectionObserver(entries => {
+      this.viewVisible = entries.some(entry => entry.isIntersecting);
+      this.updateRenderVisibility();
+    });
+    visibility.observe(this.containerEl);
+    this.register(() => visibility.disconnect());
+    this.registerDomEvent(this.containerEl.ownerDocument, "visibilitychange", () => this.updateRenderVisibility());
   }
 
   async onClose(): Promise<void> {
     this.closed = true;
     this.rememberCurrentDraft();
     this.abortController?.abort();
+    this.resetDrawingState();
     this.clearMessageRenderComponents();
     this.messagesEl = undefined;
     this.inputEl = undefined;
@@ -208,6 +225,8 @@ export class AIChatView extends ItemView {
     this.newSessionButtonEl = undefined;
     this.sessionSettingsButtonEl = undefined;
     this.clearButtonEl = undefined;
+    this.drawingContextEl = undefined;
+    this.drawingButtonEl = undefined;
   }
 
   refreshExternalState(): void {
@@ -249,8 +268,8 @@ export class AIChatView extends ItemView {
     const session = this.plugin.getActiveChatSession();
     const contextFiles = this.plugin.contextScopeResolver.resolve(this.plugin.getChatSessionContextScope(session));
     const drawingFiles = contextFiles.filter((file) => isExcalidrawFile(file, this.app));
-    if (/^\/draw(?:\s|$)/i.test(content) || (contextFiles.length === 1 && drawingFiles.length === 1 && isDrawingEditRequest(content))) {
-      await this.submitDrawingEdit(content, drawingFiles.length === 1 ? drawingFiles[0] : undefined);
+    if (this.drawingTarget || /^\/draw(?:\s|$)/i.test(content) || (contextFiles.length === 1 && drawingFiles.length === 1 && isDrawingEditRequest(content))) {
+      await this.submitDrawingEdit(content, this.drawingTarget || (drawingFiles.length === 1 ? drawingFiles[0] : undefined));
       return;
     }
     const selectionReferences = this.plugin.getPendingSelectionReferences(session.id);
@@ -409,9 +428,16 @@ export class AIChatView extends ItemView {
   }
 
   private renderMessages(followOutput = true): void {
-    if (!this.messagesEl) {
+    if (this.closed || !this.messagesEl) {
       return;
     }
+    if (!this.canRender()) {
+      this.pendingFullRender = true;
+      this.pendingFollowOutput = followOutput;
+      this.cancelStreamingTimer();
+      return;
+    }
+    this.pendingFullRender = false;
 
     const previousTop = this.messagesEl.scrollTop;
     this.clearMessageRenderComponents();
@@ -449,12 +475,13 @@ export class AIChatView extends ItemView {
       const contentEl = item.createDiv({ cls: "ai-second-brain-message-content" });
 
       this.renderMessageContent(contentEl, message);
+      if (message.drawing) this.renderDrawingActions(item, message);
 
       if (message.citations && message.citations.length > 0) {
         this.renderCitations(item, message.citations, this.getCitationListKey(message));
       }
 
-      if (message.role === "assistant" && message.content.trim() && message.isComplete) {
+      if (message.role === "assistant" && !message.drawing && message.content.trim() && message.isComplete) {
         this.renderAssistantActions(group, message, message.status === "complete");
       }
     }
@@ -464,33 +491,180 @@ export class AIChatView extends ItemView {
 
   private async submitDrawingEdit(instruction: string, file?: TFile, directText = false): Promise<void> {
     if (this.isGenerating || this.isPreparingContext) return;
+    if (!directText) instruction = instruction.replace(/^\/draw\s*/i, "").trim();
+    if (!instruction) { await this.startDrawingEdit(file); return; }
     const sessionId = this.activeSessionId;
     const originalInput = this.inputEl?.value;
     this.setPreparingContext(true);
+    let reply: ViewChatMessage | undefined;
+    const controller = new AbortController();
     try {
-      const result = await editDrawing(this.plugin, instruction, file, { history: toProviderHistory(this.messages), directText });
-      if (!result) return;
-      const additions: StoredChatMessage[] = [
-        { role: "user", content: result.instruction, status: "complete", createdAt: new Date().toISOString() },
-        { role: "assistant", content: `已更新 [[${result.path}]] 的 ${result.count} 项文本。可在 Excalidraw 中撤销。`, status: "complete", createdAt: new Date().toISOString() }
-      ];
-      const session = this.plugin.settings.chatSessions.find((item) => item.id === sessionId);
-      if (session) await this.plugin.saveChatSessionMessages(sessionId, [...session.messages, ...additions]);
-      if (sessionId === this.activeSessionId) {
-        this.messages.push(...additions.map(toViewMessage));
+      const target = await this.resolveDrawingTarget(file);
+      if (!target || this.closed || sessionId !== this.activeSessionId) return;
+      const previousPlan = this.pendingDrawing?.snapshot.path === target.path ? this.pendingDrawing.plan : undefined;
+      const history = toProviderHistory(this.messages);
+      this.expireDrawingPreview("expired");
+      if (!directText) {
+        this.drawingTarget = target;
         if (this.inputEl && this.inputEl.value === originalInput) this.inputEl.value = "";
-        this.renderMessages();
+        this.messages.push({ role: "user", content: instruction, isComplete: true, status: "complete", createdAt: new Date().toISOString() });
+      }
+      reply = { role: "assistant", content: directText ? "正在插入画布…" : "正在生成画布修改…", isComplete: false, status: "streaming", createdAt: new Date().toISOString(), drawing: { path: target.path, state: "expired" } };
+      this.messages.push(reply);
+      this.abortController = controller;
+      this.setPreparingContext(false);
+      this.setGenerating(true);
+      this.refreshDrawingContext();
+      this.renderMessages();
+      const snapshot = await this.plugin.excalidrawEditService.capture(target);
+      if (controller.signal.aborted || this.closed) throw new DOMException("已停止", "AbortError");
+      if (directText) {
+        const plan = this.plugin.excalidrawEditService.createInsertion(snapshot, instruction);
+        const receipt = await this.plugin.excalidrawEditService.applyWithUndo(snapshot, plan);
+        this.drawingReceipts.clear(); this.drawingReceipts.set(reply, receipt);
+        reply.content = `已插入 [[${snapshot.path}]]，可撤销本次写入。`;
+        reply.drawing!.state = "applied";
+      } else {
+        const plan = await this.plugin.excalidrawEditService.propose(snapshot, instruction, controller.signal, history, previousPlan);
+        if (controller.signal.aborted || this.closed) throw new DOMException("已停止", "AbortError");
+        reply.content = formatDrawingPreview(snapshot, plan);
+        reply.drawing!.state = "preview";
+        this.pendingDrawing = { message: reply, snapshot, plan };
       }
     } catch (error) {
-      new Notice(error instanceof Error ? error.message : String(error));
+      const stopped = controller.signal.aborted || isAbortError(error);
+      const text = stopped ? "已停止生成，画布保持原样。" : `画布操作失败：${error instanceof Error ? error.message : String(error)}`;
+      if (reply) { reply.content = text; reply.status = stopped ? "stopped" : "error"; }
+      else new Notice(text);
     } finally {
+      if (reply) reply.isComplete = true;
+      if (reply?.status === "streaming") reply.status = "complete";
       this.setPreparingContext(false);
+      this.setGenerating(false);
+      this.abortController = undefined;
+      this.refreshDrawingContext();
+      this.renderMessages();
+      if (reply) await this.saveMessages();
     }
   }
 
+  async startDrawingEdit(file?: TFile): Promise<void> {
+    if (this.isGenerating || this.isPreparingContext) return;
+    this.setPreparingContext(true);
+    try {
+      const target = await this.resolveDrawingTarget(file);
+      if (!target || this.closed) return;
+      if (this.pendingDrawing?.snapshot.file !== target) this.expireDrawingPreview("expired");
+      this.drawingTarget = target;
+      this.refreshDrawingContext(); this.renderMessages(false);
+    } catch (error) { new Notice(error instanceof Error ? error.message : String(error)); }
+    finally { this.setPreparingContext(false); this.refreshDrawingContext(); this.inputEl?.focus(); }
+  }
+
+  private async resolveDrawingTarget(file?: TFile): Promise<TFile | undefined> {
+    const candidates: Array<TFile | undefined | null> = file ? [file] : [this.drawingTarget];
+    if (!file) {
+      const session = this.plugin.getActiveChatSession();
+      const scoped = this.plugin.contextScopeResolver.resolve(this.plugin.getChatSessionContextScope(session));
+      if (scoped.length === 1) candidates.push(scoped[0]);
+      candidates.push(this.plugin.getCurrentDrawingFile?.(), this.app.workspace.getActiveFile());
+    }
+    const target = candidates.find(item => item && isExcalidrawFile(item, this.app) && this.app.vault.getAbstractFileByPath(item.path) === item);
+    if (target) return target;
+    if (file) throw new Error("目标画布已移动或删除，请重新选择。");
+    if (!this.app.vault.getFiles().some(item => isExcalidrawFile(item, this.app))) throw new Error("没有找到 Excalidraw 画布，请先创建或导入画布。");
+    return pickDrawingFile(this.app);
+  }
+
+  private refreshDrawingContext(): void {
+    if (!this.drawingContextEl) return;
+    this.drawingContextEl.empty(); this.drawingContextEl.hidden = !this.drawingTarget;
+    this.drawingButtonEl?.setAttribute("aria-pressed", String(Boolean(this.drawingTarget)));
+    if (this.inputEl) this.inputEl.placeholder = this.drawingTarget ? "描述要修改的内容，或继续调整上面的预览…" : "向你的笔记提问，或让 AI 帮你整理思路...";
+    if (!this.drawingTarget) return;
+    const busy = this.isGenerating || this.isPreparingContext;
+    const target = createIconButton(this.drawingContextEl, "pencil-ruler", `画布 · ${this.drawingTarget.basename}`, "ai-second-brain-drawing-target");
+    target.title = `切换画布：${this.drawingTarget.path}`; target.disabled = busy;
+    target.addEventListener("click", () => {
+      if (this.isGenerating || this.isPreparingContext) return;
+      this.setPreparingContext(true);
+      void pickDrawingFile(this.app).then(file => {
+        if (file && !this.closed) { this.expireDrawingPreview("expired"); this.drawingTarget = file; this.renderMessages(false); }
+      }).finally(() => { this.setPreparingContext(false); this.refreshDrawingContext(); });
+    });
+    const exit = createIconButton(this.drawingContextEl, "x", "退出画布编辑");
+    exit.disabled = busy;
+    exit.addEventListener("click", () => {
+      if (this.isGenerating || this.isPreparingContext) return;
+      this.expireDrawingPreview("discarded"); this.drawingTarget = undefined;
+      this.refreshDrawingContext(); this.renderMessages(false); void this.saveMessages();
+    });
+  }
+
+  private expireDrawingPreview(state: "expired" | "discarded"): void {
+    if (this.pendingDrawing?.message.drawing) this.pendingDrawing.message.drawing.state = state;
+    this.pendingDrawing = undefined;
+  }
+
+  private resetDrawingState(): void {
+    this.expireDrawingPreview("expired"); this.drawingTarget = undefined;
+    this.drawingReceipts.clear(); this.refreshDrawingContext();
+  }
+
+  private renderDrawingActions(container: HTMLElement, message: ViewChatMessage): void {
+    if (!message.isComplete || message.status !== "complete") return;
+    const state = message.drawing?.state;
+    const actions = container.createDiv({ cls: "ai-second-brain-drawing-actions", attr: { "aria-live": "polite" } });
+    const draft = this.pendingDrawing?.message === message ? this.pendingDrawing : undefined;
+    const busy = this.isGenerating || this.isPreparingContext;
+    if (state === "preview" && draft) {
+      const apply = actions.createEl("button", { text: "写入画布", cls: "mod-cta", attr: { type: "button" } });
+      const discard = actions.createEl("button", { text: "放弃", attr: { type: "button" } });
+      apply.disabled = discard.disabled = busy;
+      apply.addEventListener("click", () => { void this.applyDrawingPreview(message); });
+      discard.addEventListener("click", () => {
+        if (this.isGenerating || this.isPreparingContext) return;
+        this.expireDrawingPreview("discarded"); this.renderMessages(false); void this.saveMessages();
+      });
+    } else if (state === "applied") {
+      actions.createSpan({ text: "已写入 · 可在画布中撤销" });
+      const receipt = this.drawingReceipts.get(message);
+      if (receipt) {
+        const undo = actions.createEl("button", { text: "撤销本次写入", attr: { type: "button" } });
+        undo.disabled = busy;
+        undo.addEventListener("click", () => { void this.undoDrawingWrite(message, receipt); });
+      }
+    } else actions.createSpan({ text: state === "discarded" ? "已放弃，画布保持原样" : state === "undone" ? "已撤销本次写入" : "预览已失效，请重新生成" });
+  }
+
+  private async applyDrawingPreview(message: ViewChatMessage): Promise<void> {
+    const draft = this.pendingDrawing;
+    if (!draft || draft.message !== message || this.isGenerating || this.isPreparingContext) return;
+    this.setPreparingContext(true); this.renderMessages(false);
+    try {
+      const receipt = await this.plugin.excalidrawEditService.applyWithUndo(draft.snapshot, draft.plan);
+      this.drawingReceipts.clear(); this.drawingReceipts.set(message, receipt); message.drawing!.state = "applied";
+      message.content = message.content.replace(/^待写入/, "已写入"); this.pendingDrawing = undefined;
+    } catch (error) {
+      this.expireDrawingPreview("expired"); new Notice(error instanceof Error ? error.message : String(error));
+    } finally { this.setPreparingContext(false); this.refreshDrawingContext(); this.renderMessages(false); await this.saveMessages(); }
+  }
+
+  private async undoDrawingWrite(message: ViewChatMessage, receipt: DrawingWriteReceipt): Promise<void> {
+    if (this.isGenerating || this.isPreparingContext) return;
+    this.setPreparingContext(true); this.renderMessages(false);
+    try {
+      await this.plugin.excalidrawEditService.undo(receipt);
+      message.drawing!.state = "undone"; message.content = `已撤销对 [[${receipt.snapshot.path}]] 的本次写入。`;
+      this.drawingReceipts.delete(message);
+    } catch (error) { new Notice(error instanceof Error ? error.message : String(error)); }
+    finally { this.setPreparingContext(false); this.refreshDrawingContext(); this.renderMessages(false); await this.saveMessages(); }
+  }
+
   private scheduleLastMessageContentUpdate(message: ViewChatMessage): void {
+    if (this.closed) return;
     this.pendingStreamingMessage = message;
-    if (this.streamingRenderTimer !== undefined) {
+    if (!this.canRender() || this.streamingRenderTimer !== undefined) {
       return;
     }
 
@@ -502,16 +676,17 @@ export class AIChatView extends ItemView {
     const renderDelay = message.content.length > 12000 ? 180 : message.content.length > 4000 ? 110 : 60;
     this.streamingRenderTimer = ownerWindow.setTimeout(() => {
       this.streamingRenderTimer = undefined;
+      if (!this.canRender()) return;
       const pending = this.pendingStreamingMessage;
       this.pendingStreamingMessage = undefined;
       if (pending) {
-        void this.updateLastMessageContent(pending);
+        this.updateLastMessageContent(pending);
       }
     }, renderDelay);
   }
 
-  private async updateLastMessageContent(message: ViewChatMessage): Promise<void> {
-    if (!this.messagesEl) {
+  private updateLastMessageContent(message: ViewChatMessage): void {
+    if (!this.messagesEl || !this.canRender()) {
       return;
     }
 
@@ -543,30 +718,17 @@ export class AIChatView extends ItemView {
     }
 
     const shouldFollowOutput = isNearScrollBottom(this.messagesEl);
-    const renderVersion = ++this.streamingRenderVersion;
-    const stagingEl = contentEl.ownerDocument.createElement("div");
-    stagingEl.className = "ai-second-brain-chat-render-staging";
-    const renderComponent = this.addChild(new Component());
-    const sourcePath = this.plugin.getEditableMarkdownView()?.file?.path || "";
-    await MarkdownRenderer.render(this.app, message.content, stagingEl, sourcePath, renderComponent);
-    enhanceMermaidArtifacts(stagingEl, extractMermaidSources(message.content));
-    this.enhanceInlineCitations(stagingEl, message.citations || []);
-
-    if (renderVersion !== this.streamingRenderVersion || !contentEl.isConnected) {
-      this.removeChild(renderComponent);
-      return;
-    }
-
-    if (this.streamingRenderComponent) {
-      this.removeChild(this.streamingRenderComponent);
-    }
-    this.streamingRenderComponent = renderComponent;
-    contentEl.empty();
-    contentEl.addClass("is-rendered-markdown");
-    while (stagingEl.firstChild) {
-      contentEl.appendChild(stagingEl.firstChild);
-    }
-    if (!message.isComplete) {
+    // Parsing Markdown (including Mermaid) for every delta repeats all prior work.
+    // Keep one text node during generation; the completed answer uses renderMessages.
+    const existingText = contentEl.firstChild;
+    if (existingText?.nodeType === 3) {
+      const text = existingText as Text;
+      if (message.content.startsWith(text.data)) text.appendData(message.content.slice(text.length));
+      else text.data = message.content;
+    } else {
+      contentEl.empty();
+      contentEl.removeClass("is-rendered-markdown");
+      contentEl.appendChild(contentEl.ownerDocument.createTextNode(message.content));
       contentEl.createSpan({ cls: "ai-second-brain-stream-cursor" });
     }
 
@@ -616,6 +778,21 @@ export class AIChatView extends ItemView {
   }
 
   private renderMessageContent(container: HTMLElement, message: ViewChatMessage): void {
+    const draft = this.pendingDrawing?.message === message ? this.pendingDrawing : undefined;
+    if (draft) {
+      container.addClass("ai-second-brain-drawing-preview");
+      container.createDiv({ cls: "ai-second-brain-drawing-preview-target", text: `待写入 · ${draft.snapshot.file.name}` });
+      container.createDiv({ cls: "ai-second-brain-drawing-preview-summary", text: draft.plan.summary });
+      const elements = new Map(draft.snapshot.elements.map(element => [element.id, element]));
+      for (const edit of draft.plan.edits) {
+        const row = container.createDiv({ cls: "ai-second-brain-drawing-preview-edit" });
+        row.createDiv({ cls: "ai-second-brain-drawing-preview-label", text: edit.type === "add-text" ? "新增文本" : "修改文本" });
+        const original = edit.elementId ? elements.get(edit.elementId) : undefined;
+        if (original) row.createDiv({ cls: "ai-second-brain-drawing-preview-before", text: original.rawText || original.originalText || original.text || "" });
+        row.createDiv({ cls: "ai-second-brain-drawing-preview-text", text: edit.text });
+      }
+      return;
+    }
     if (message.role === "assistant" && message.isComplete && message.content.trim()) {
       container.addClass("is-rendered-markdown");
       const sourcePath = this.plugin.getEditableMarkdownView()?.file?.path || "";
@@ -663,14 +840,15 @@ export class AIChatView extends ItemView {
     if (!includeWriteActions) {
       return;
     }
-    const writeDrawingButton = createIconButton(actions, "pencil-ruler", "写入 Excalidraw 画布");
+    const writeDrawingButton = createIconButton(actions, "pencil-ruler", "插入 Excalidraw 画布");
     writeDrawingButton.addEventListener("click", () => { void this.submitDrawingEdit(message.content, undefined, true); });
 
     const html = extractHtmlDocument(message.content);
-    if (html) {
+    if (html && this.plugin.settings.enableHtmlPreview) {
       const htmlButton = createIconButton(actions, "app-window", "保存 HTML 并预览");
       let saved: TFile | undefined;
       htmlButton.addEventListener("click", () => {
+        if (!this.plugin.settings.enableHtmlPreview) { new Notice("请先在插件设置中开启「启用 HTML 原生预览」。"); return; }
         htmlButton.disabled = true;
         void (async () => {
           saved = saved || await saveHtmlArtifact(this.app, html);
@@ -1166,6 +1344,8 @@ export class AIChatView extends ItemView {
     }
 
     this.rememberCurrentDraft();
+    this.resetDrawingState();
+    await this.saveMessages();
     const session = await this.plugin.setActiveChatSession(sessionId);
 
     if (!session) {
@@ -1188,6 +1368,7 @@ export class AIChatView extends ItemView {
 
   private async clearMessages(): Promise<void> {
     this.abortController?.abort();
+    this.resetDrawingState();
     this.messages = [];
     this.expandedCitationKeys.clear();
     this.expandedCitationListKeys.clear();
@@ -1206,6 +1387,7 @@ export class AIChatView extends ItemView {
           content: message.content,
           citations: message.citations,
           selectionReferences: message.selectionReferences,
+          drawing: message.drawing,
           status: message.status === "streaming" ? "stopped" : message.status,
           createdAt: message.createdAt || new Date().toISOString()
         }))
@@ -1215,6 +1397,8 @@ export class AIChatView extends ItemView {
 
   private setGenerating(value: boolean): void {
     this.isGenerating = value;
+    this.refreshDrawingContext();
+    if (this.drawingButtonEl) this.drawingButtonEl.disabled = value || this.isPreparingContext;
 
     if (this.inputEl) {
       this.inputEl.disabled = value;
@@ -1251,6 +1435,8 @@ export class AIChatView extends ItemView {
 
   private setPreparingContext(value: boolean): void {
     this.isPreparingContext = value;
+    this.refreshDrawingContext();
+    if (this.drawingButtonEl) this.drawingButtonEl.disabled = value || this.isGenerating;
     if (this.inputEl) this.inputEl.disabled = value;
     if (this.clearButtonEl) this.clearButtonEl.disabled = value;
 
@@ -1305,6 +1491,7 @@ export class AIChatView extends ItemView {
     }
     const session = this.plugin.settings.chatSessions.find((item) => item.id === activeSessionId);
     if (!session) return;
+    this.resetDrawingState();
     this.activeSessionId = session.id;
     this.messages = session.messages.map(toViewMessage);
     this.expandedCitationKeys.clear();
@@ -1331,23 +1518,33 @@ export class AIChatView extends ItemView {
   }
 
   private clearMessageRenderComponents(): void {
-    const ownerWindow = this.containerEl.ownerDocument.defaultView;
-    if (this.streamingRenderTimer !== undefined && ownerWindow) {
-      ownerWindow.clearTimeout(this.streamingRenderTimer);
-    }
-    this.streamingRenderTimer = undefined;
+    this.cancelStreamingTimer();
     this.pendingStreamingMessage = undefined;
-    this.streamingRenderVersion += 1;
-    if (this.streamingRenderComponent) {
-      this.removeChild(this.streamingRenderComponent);
-      this.streamingRenderComponent = undefined;
-    }
 
     for (const component of this.messageRenderComponents) {
       this.removeChild(component);
     }
 
     this.messageRenderComponents = [];
+  }
+
+  private canRender(): boolean {
+    return !this.closed && this.viewVisible && !this.containerEl.ownerDocument.hidden;
+  }
+
+  private updateRenderVisibility(): void {
+    if (this.closed) return;
+    if (!this.canRender()) { this.cancelStreamingTimer(); return; }
+    if (this.pendingFullRender) this.renderMessages(this.pendingFollowOutput);
+    else if (this.pendingStreamingMessage) this.scheduleLastMessageContentUpdate(this.pendingStreamingMessage);
+  }
+
+  private cancelStreamingTimer(): void {
+    const ownerWindow = this.containerEl.ownerDocument.defaultView;
+    if (this.streamingRenderTimer !== undefined && ownerWindow) {
+      ownerWindow.clearTimeout(this.streamingRenderTimer);
+    }
+    this.streamingRenderTimer = undefined;
   }
 
   private renderPendingSelectionReferences(): void {
@@ -1548,13 +1745,14 @@ export function toViewMessage(message: StoredChatMessage): ViewChatMessage {
     selectionReferences: message.selectionReferences,
     isComplete: true,
     status: message.status || "complete",
-    createdAt: message.createdAt
+    createdAt: message.createdAt,
+    drawing: message.drawing ? { ...message.drawing, state: message.drawing.state === "preview" ? "expired" : message.drawing.state } : undefined
   };
 }
 
 export function toProviderHistory(messages: ViewChatMessage[]): ChatMessage[] {
   return messages
-    .filter((message) => message.content.trim() && message.status === "complete")
+    .filter((message) => message.content.trim() && message.status === "complete" && (!message.drawing || message.drawing.state === "applied"))
     .map((message) => ({
       role: message.role,
       content: appendSelectionReferences(message.content, message.selectionReferences || [])

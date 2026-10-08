@@ -79,6 +79,13 @@ export class ObsidianAISettingTab extends PluginSettingTab {
     this.renderSettingsSection(containerEl, "diagrams", "workflow", "视觉图谱", "配置 Excalidraw 图谱的保存位置和生成边界。", (section) => {
       this.renderDiagramSection(section);
     });
+    this.renderSettingsSection(containerEl, "html", "app-window", "HTML 预览", "选择是否使用本插件在 Obsidian 内查看 HTML 页面。", (section) => {
+      new Setting(section).setName("启用 HTML 原生预览")
+        .setDesc("默认关闭。开启后可完整预览 HTML；更改后重新加载插件，以更新 .html / .htm 的默认打开方式。关闭会立即关闭本插件的预览页。")
+        .addToggle(toggle => toggle.setValue(this.plugin.settings.enableHtmlPreview).onChange(async value => {
+          await this.plugin.setHtmlPreviewEnabled(value);
+        }));
+    });
   }
 
   hide(): void {
@@ -113,6 +120,7 @@ export class ObsidianAISettingTab extends PluginSettingTab {
       { target: "ai-second-brain-settings-contexts", icon: "folder-lock", label: "上下文" },
       { target: "ai-second-brain-settings-templates", icon: "scroll-text", label: "模板" },
       { target: "ai-second-brain-settings-diagrams", icon: "workflow", label: "图谱" },
+      { target: "ai-second-brain-settings-html", icon: "app-window", label: "HTML" },
       { icon: "book-open", label: "指南", subview: "guide" }
     ];
 

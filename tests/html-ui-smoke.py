@@ -43,7 +43,7 @@ with serve(root, ResourceHandler) as base_url, sync_playwright() as p:
     assert page.frame_locator('iframe[title="HTML 互动预览"]').locator("iframe").get_attribute("sandbox") == "allow-scripts"
     page.screenshot(path=str(root / ".test-output/html-preview.png"), full_page=True)
     page.get_by_role("button", name="源码", exact=True).click()
-    expect(page.get_by_role("textbox", name="HTML 源码（只读）")).to_have_value(__import__('re').compile('.*交互式 HTML 预览.*', __import__('re').S))
+    expect(page.get_by_role("textbox", name="HTML 源码")).to_have_value(__import__('re').compile('.*交互式 HTML 预览.*', __import__('re').S))
     page.get_by_role("button", name="预览", exact=True).click()
     page.evaluate("htmlFixture.changeStyle()")
     expect(frame.locator("#count")).to_have_css("color", "rgb(180, 20, 30)")

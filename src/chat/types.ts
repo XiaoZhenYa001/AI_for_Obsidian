@@ -21,6 +21,7 @@ export type StoredChatMessage = {
   selectionReferences?: SelectionReference[];
   createdAt: string;
   status?: "complete" | "error" | "stopped";
+  drawing?: { path: string; state: "preview" | "applied" | "discarded" | "expired" | "undone" };
 };
 
 export type StoredChatSession = {
@@ -54,4 +55,5 @@ export type ViewChatMessage = {
   isComplete: boolean;
   status: "streaming" | "complete" | "error" | "stopped";
   createdAt?: string;
+  drawing?: StoredChatMessage["drawing"];
 };

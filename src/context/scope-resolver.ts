@@ -20,7 +20,13 @@ export class ContextScopeResolver {
       return isContextFile(activeFile) ? [activeFile] : [];
     }
 
-    const contextFiles = this.app.vault.getAllLoadedFiles().filter(isContextFile);
+    // Explicit selections scale with the selection, not the size of the vault.
+    const contextFiles = scope.mode === "files" || (scope.mode === "mixed" && scope.folders.length === 0)
+      ? Array.from(new Set(scope.files))
+        .map((path) => this.app.vault.getAbstractFileByPath(path))
+        .filter(isContextFile)
+      : this.app.vault.getAllLoadedFiles().filter(isContextFile);
+    const selectedPaths = new Set(scope.files);
 
     return contextFiles.filter((file) => {
       if (scope.excludeRules.some((rule) => file.path.includes(rule))) {
@@ -28,7 +34,7 @@ export class ContextScopeResolver {
       }
 
       if (scope.mode === "files") {
-        return scope.files.includes(file.path);
+        return selectedPaths.has(file.path);
       }
 
       if (scope.mode === "folders") {
@@ -36,7 +42,7 @@ export class ContextScopeResolver {
       }
 
       if (scope.mode === "mixed") {
-        return scope.files.includes(file.path) ||
+        return selectedPaths.has(file.path) ||
           scope.folders.some((folder) => file.path.startsWith(`${folder.replace(/\/$/, "")}/`));
       }
 

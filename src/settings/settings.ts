@@ -17,5 +17,6 @@ export type ObsidianAISettings = {
   diagramFolder: string;
   diagramMaxNodes: number;
   diagramAutoEmbed: boolean;
+  enableHtmlPreview: boolean;
   lastModificationSnapshot?: ModificationSnapshot;
 };
