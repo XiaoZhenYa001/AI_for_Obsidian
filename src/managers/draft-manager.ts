@@ -2,6 +2,7 @@ import { normalizePath, Notice, TFile, TFolder } from "obsidian";
 import type ObsidianAIPlugin from "../main";
 import { KnowledgeHealthReport } from "../knowledge/types";
 import { normalizeMermaidMarkdown } from "../utils/mermaid";
+import { isExcalidrawFile } from "../diagrams/excalidraw-edit-service";
 
 const AI_FOLDER = "AI Second Brain";
 
@@ -58,7 +59,8 @@ export class DraftManager {
 
   async createHealthReport(): Promise<KnowledgeHealthReport | undefined> {
     const scope = this.plugin.getActiveContextScope();
-    const files = this.plugin.contextScopeResolver.resolve(scope).filter((file) => file.extension === "md");
+    const files = this.plugin.contextScopeResolver.resolve(scope)
+      .filter((file) => file.extension.toLowerCase() === "md" && !isExcalidrawFile(file, this.plugin.app));
 
     if (files.length === 0) {
       new Notice("当前上下文范围内没有可分析的 Markdown 文件。");

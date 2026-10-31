@@ -23,10 +23,28 @@ export function createChatComposer(container: HTMLElement, actions: ChatComposer
   const actionsEl = mainEl.createDiv({ cls: "ai-second-brain-composer-actions" });
   const drawingButtonEl = createIconButton(actionsEl, "pencil-ruler", "编辑 Excalidraw 画布（也可输入 /draw 指令）", "ai-second-brain-composer-drawing");
   drawingButtonEl.addEventListener("click", () => actions.editDrawing(inputEl.value));
+  actionsEl.createSpan({ cls: "ai-second-brain-composer-hint", text: "Ctrl / ⌘ + Enter 发送" });
   const sendButtonEl = createIconButton(actionsEl, "send-horizontal", "发送", "ai-second-brain-send mod-cta");
   sendButtonEl.addEventListener("click", actions.send);
   const stopButtonEl = createIconButton(actionsEl, "square", "停止", "ai-second-brain-stop");
   stopButtonEl.style.display = "none";
   stopButtonEl.addEventListener("click", actions.stop);
-  return { composerEl, referencesEl, drawingContextEl, inputEl, sendButtonEl, drawingButtonEl, stopButtonEl };
+  let busy = false;
+  const refresh = () => {
+    sendButtonEl.disabled = busy || !inputEl.value.trim();
+    inputEl.style.height = "auto";
+    inputEl.style.height = `${Math.min(160, Math.max(72, inputEl.scrollHeight))}px`;
+  };
+  inputEl.addEventListener("input", refresh);
+  const setBusy = (generating: boolean, preparing: boolean) => {
+    busy = generating || preparing;
+    inputEl.disabled = busy;
+    drawingButtonEl.disabled = busy;
+    sendButtonEl.style.display = generating ? "none" : "";
+    stopButtonEl.style.display = generating ? "" : "none";
+    composerEl.setAttribute("aria-busy", String(busy));
+    refresh();
+  };
+  refresh();
+  return { composerEl, referencesEl, drawingContextEl, inputEl, sendButtonEl, drawingButtonEl, stopButtonEl, setBusy, refresh };
 }

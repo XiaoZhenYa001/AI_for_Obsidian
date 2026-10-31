@@ -1482,6 +1482,47 @@
   display: none;
 }
 
+.ai-second-brain-header-context {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(72px, 34%);
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+button.ai-second-brain-session-switcher {
+  justify-content: flex-start;
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  padding: 0 4px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.ai-second-brain-session-switcher .ai-second-brain-button-label,
+.ai-second-brain-model-picker .ai-second-brain-button-label {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+button.ai-second-brain-model-picker {
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  color: var(--text-muted);
+  font-size: 11px;
+  justify-content: flex-start;
+  height: 34px;
+  padding: 0 4px;
+  width: 100%;
+}
+
 .ai-second-brain-title {
   color: var(--text-normal);
   font-size: 16px;
@@ -1979,6 +2020,10 @@
   max-width: 220px;
 }
 
+.ai-second-brain-empty-action {
+  margin-top: 14px;
+}
+
 .ai-second-brain-message-group {
   max-width: 100%;
   min-width: 0;
@@ -2467,11 +2512,10 @@ button.ai-second-brain-mermaid-action svg {
 }
 
 .ai-second-brain-message-actions {
-  animation: ai-second-brain-actions-enter 160ms ease-out both;
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  justify-content: flex-end;
+  justify-content: flex-start;
   margin-top: 9px;
   max-width: 100%;
   min-width: 0;
@@ -2485,6 +2529,28 @@ button.ai-second-brain-mermaid-action svg {
   font-size: 12px;
 }
 
+.ai-second-brain-message-actions > .ai-second-brain-icon-button {
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  color: var(--text-muted);
+  padding: 0 7px;
+}
+
+.ai-second-brain-message-actions > .ai-second-brain-icon-button:hover:not(:disabled) {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
+.ai-second-brain-message-actions .ai-second-brain-message-more .ai-second-brain-button-label {
+  display: none;
+}
+
+.ai-second-brain-message-actions > .ai-second-brain-artifact-action {
+  flex-basis: auto;
+  color: var(--text-accent);
+}
+
 .ai-second-brain-icon-button {
   align-items: center;
   border-radius: var(--ai-second-brain-radius);
@@ -2495,16 +2561,8 @@ button.ai-second-brain-mermaid-action svg {
   line-height: 1;
   min-width: 0;
   padding: 0 10px;
-  transition: background-color 120ms ease, border-color 120ms ease, opacity 120ms ease, transform 120ms ease;
+  transition: background-color 120ms ease, border-color 120ms ease, opacity 120ms ease;
   white-space: nowrap;
-}
-
-.ai-second-brain-icon-button:hover:not(:disabled) {
-  transform: translateY(-1px);
-}
-
-.ai-second-brain-icon-button:active:not(:disabled) {
-  transform: translateY(0);
 }
 
 .ai-second-brain-icon-button:disabled {
@@ -2533,18 +2591,6 @@ button.ai-second-brain-mermaid-action svg {
 .ai-second-brain-button-label {
   overflow: hidden;
   text-overflow: ellipsis;
-}
-
-@keyframes ai-second-brain-actions-enter {
-  from {
-    opacity: 0;
-    transform: translateY(-4px);
-  }
-
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
 }
 
 @keyframes ai-second-brain-dot-pulse {
@@ -3013,6 +3059,13 @@ button.ai-second-brain-mermaid-action svg {
   min-width: 0;
 }
 
+.ai-second-brain-composer-hint {
+  color: var(--text-faint, var(--text-muted));
+  font-size: 10px;
+  flex: 1;
+  min-width: 0;
+}
+
 .ai-second-brain-composer-drawing {
   flex: 0 0 auto;
   height: 32px;
@@ -3248,7 +3301,7 @@ button.ai-second-brain-mermaid-action svg {
   flex: 0 0 auto;
   min-width: 0;
   width: 100%;
-  min-height: 88px;
+  min-height: 72px;
   max-height: 160px;
   resize: none;
   border-radius: var(--ai-second-brain-radius);
@@ -3719,15 +3772,12 @@ button.ai-second-brain-mermaid-action svg {
   padding: 4px;
   pointer-events: none;
   position: fixed;
-  transform: translateY(4px) scale(0.98);
-  transition: opacity 110ms ease, transform 110ms ease;
   z-index: var(--layer-popover, 1000);
 }
 
 .ai-second-brain-selection-toolbar.is-visible {
   opacity: 1;
   pointer-events: auto;
-  transform: translateY(0) scale(1);
 }
 
 .ai-second-brain-selection-toolbar-button {
@@ -3825,12 +3875,6 @@ button.ai-second-brain-mermaid-action svg {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .ai-second-brain-selection-toolbar {
-    transition: none;
-  }
 }
 
 /* Selection result preview */
@@ -4104,7 +4148,7 @@ button.ai-second-brain-mermaid-action svg {
 
 @media (prefers-reduced-motion: reduce) {
   .ai-second-brain-selection-preview-spinner {
-    animation-duration: 1600ms;
+    animation: none;
   }
 }
 
@@ -4294,12 +4338,25 @@ button.ai-second-brain-mermaid-action svg {
 @media (prefers-reduced-motion: reduce) {
   .ai-second-brain-thinking-dots span,
   .ai-second-brain-stream-cursor,
-  .ai-second-brain-message-actions,
   .ai-second-brain-citation-detail {
     animation: none;
   }
 
   .ai-second-brain-icon-button {
+    transition: none;
+  }
+
+  .ai-second-brain-inline-citation-preview,
+  .ai-second-brain-inline-citation-preview.is-below,
+  .ai-second-brain-inline-citation:hover .ai-second-brain-inline-citation-preview,
+  .ai-second-brain-inline-citation:focus-visible .ai-second-brain-inline-citation-preview,
+  .ai-second-brain-inline-citation:hover .ai-second-brain-inline-citation-preview.is-below,
+  .ai-second-brain-inline-citation:focus-visible .ai-second-brain-inline-citation-preview.is-below {
+    transform: none;
+    transition: opacity 120ms ease;
+  }
+
+  .ai-second-brain-modification-chevron {
     transition: none;
   }
 }
@@ -5232,6 +5289,12 @@ button.ai-second-brain-mermaid-action svg {
   transform: rotate(180deg);
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .ai-second-brain-settings-disclosure-chevron {
+    transition: none;
+  }
+}
+
 .ai-second-brain-settings-disclosure-body {
   border-top: 1px solid var(--ai-second-brain-border);
   padding: 0 12px 6px;
@@ -5402,7 +5465,7 @@ button.ai-second-brain-mermaid-action svg {
 
 @media (min-width: 1180px) {
   .ai-second-brain-control-stats {
-    grid-template-columns: repeat(6, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
   .ai-second-brain-control-stat,
@@ -5527,6 +5590,36 @@ button.ai-second-brain-mermaid-action svg {
     padding-top: 17px;
   }
 }
+.ai-second-brain-settings-section > summary,
+.ai-second-brain-authorized-preview > summary {
+  cursor: pointer;
+  list-style: none;
+}
+
+.ai-second-brain-settings-section > summary::-webkit-details-marker,
+.ai-second-brain-authorized-preview > summary::-webkit-details-marker { display: none; }
+.ai-second-brain-settings-section > summary::after,
+.ai-second-brain-authorized-preview > summary::after {
+  content: "";
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-right: 1px solid var(--text-muted);
+  border-bottom: 1px solid var(--text-muted);
+  transform: rotate(-45deg);
+  margin-left: auto;
+}
+.ai-second-brain-settings-section[open] > summary::after,
+.ai-second-brain-authorized-preview[open] > summary::after { transform: rotate(45deg); }
+.ai-second-brain-health-section > summary {
+  color: var(--text-normal);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 6px 0;
+}
+.ai-second-brain-health-section [hidden] { display: none; }
+
 .ai-second-brain-drawing-context {
   display: flex;
   align-items: center;

@@ -327,6 +327,25 @@ test('plan context excludes Excalidraw filenames and frontmatter-marked drawings
   await assert.rejects(service.createPlan('edit drawing', ['Board.excalidraw.md', 'Sketch.md']), /AI 编辑画布内容/);
 });
 
+test('plan reports included and skipped files with their actual selection reasons', async () => {
+  const notes = Object.fromEntries(Array.from({ length: 25 }, (_, index) => [`note${index}.md`, index === 1 ? 'x'.repeat(90001) : `text ${index}`]));
+  const { plugin, service } = harness(notes);
+  let prompt = '';
+  plugin.chatService = { async sendMessage(content) {
+    prompt = content;
+    return { content: JSON.stringify(plan({ operation: 'update', path: 'note0.md', edits: [{ oldText: 'text 0', newText: 'changed' }] })) };
+  } };
+  const result = await service.createPlan('update', [...Object.keys(notes), 'missing.md']);
+  assert.equal(result.coverage.included.length, 23);
+  assert.deepEqual(JSON.parse(JSON.stringify(result.coverage.skipped)), [
+    { path: 'missing.md', reason: '文件不存在或不是文件' },
+    { path: 'note1.md', reason: '超出本次内容大小预算' },
+    { path: 'note24.md', reason: '超出前 24 个文件的限制' }
+  ]);
+  assert.match(prompt, /note0\.md/);
+  assert.doesNotMatch(prompt, /note1\.md|note24\.md|missing\.md/);
+});
+
 test('generic apply refuses existing drawings even when a plan bypasses generation', async () => {
   for (const path of ['Board.excalidraw.md', 'Sketch.md']) {
     for (const operation of ['update', 'rename', 'delete']) {

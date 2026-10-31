@@ -16,6 +16,7 @@ import { pickContextSource } from "../context/context-source-picker-modal";
 import { enhanceMermaidArtifacts, extractMermaidSources } from "../ui/mermaid-artifact";
 import { buildFolderAnalysisInstruction, detectFolderAnalysisIntent } from "./folder-analysis";
 import { ModificationPlanModal } from "../modifications/modification-plan-modal";
+import { FileAgentModal } from "../modifications/file-agent-modal";
 import { ChatSessionManagerModal } from "./chat-session-manager-modal";
 import { normalizeMermaidMarkdown } from "../utils/mermaid";
 import { DrawingSnapshot, DrawingWriteReceipt, isExcalidrawFile } from "../diagrams/excalidraw-edit-service";
@@ -24,6 +25,9 @@ import { pickDrawingFile } from "../diagrams/drawing-file-picker";
 import { formatDrawingPreview } from "../diagrams/drawing-chat";
 import { extractHtmlDocument, saveHtmlArtifact } from "../html/html-artifact";
 import { createChatComposer } from "./chat-composer";
+import { confirmAction } from "../ui/confirm-modal";
+import { GenerateContentModal } from "../actions/generate-content-modal";
+import { AuthorizedFilesModal } from "../context/authorized-files-modal";
 
 export const AI_CHAT_VIEW_TYPE = "ai-second-brain-chat-view";
 const COLLAPSED_CITATION_COUNT = 3;
@@ -35,12 +39,13 @@ export class AIChatView extends ItemView {
   private scopePickerEl?: HTMLButtonElement;
   private scopeIconEl?: HTMLElement;
   private scopeLabelEl?: HTMLElement;
+  private modelButtonEl?: HTMLButtonElement;
+  private composer?: ReturnType<typeof createChatComposer>;
   private sendButtonEl?: HTMLButtonElement;
   private selectionReferencesEl?: HTMLElement;
   private stopButtonEl?: HTMLButtonElement;
   private newSessionButtonEl?: HTMLButtonElement;
   private sessionSettingsButtonEl?: HTMLButtonElement;
-  private clearButtonEl?: HTMLButtonElement;
   private messages: ViewChatMessage[] = [];
   private activeSessionId = "";
   private isGenerating = false;
@@ -50,6 +55,7 @@ export class AIChatView extends ItemView {
   private expandedCitationListKeys = new Set<string>();
   private citationFreshnessCache = new Map<string, boolean>();
   private messageRenderComponents: Component[] = [];
+  private readonly messageGroups = new WeakMap<HTMLElement, ViewChatMessage>();
   private streamingRenderTimer?: number;
   private pendingStreamingMessage?: ViewChatMessage;
   private viewVisible = true;
@@ -57,6 +63,7 @@ export class AIChatView extends ItemView {
   private pendingFollowOutput = true;
   private sessionDrafts = new Map<string, string>();
   private visibleMessageCount = 60;
+  private historyAnchor?: { restore: () => void; release: () => void };
   private closed = false;
   private drawingContextEl?: HTMLElement;
   private drawingButtonEl?: HTMLButtonElement;
@@ -66,6 +73,7 @@ export class AIChatView extends ItemView {
 
   constructor(leaf: WorkspaceLeaf, private readonly plugin: ObsidianAIPlugin) {
     super(leaf);
+    this.sessionDrafts = plugin.chatInputDrafts || this.sessionDrafts;
   }
 
   getViewType(): string {
@@ -91,7 +99,8 @@ export class AIChatView extends ItemView {
 
     const header = container.createDiv({ cls: "ai-second-brain-header" });
     const titleRow = header.createDiv({ cls: "ai-second-brain-header-row" });
-    titleRow.createEl("div", { cls: "ai-second-brain-title", text: "AI Second Brain" });
+    this.sessionSwitcherButtonEl = createIconButton(titleRow, "messages-square", "当前对话", "ai-second-brain-session-switcher");
+    this.sessionSwitcherButtonEl.addEventListener("click", () => this.openSessionSwitcher());
 
     const headerActions = titleRow.createDiv({ cls: "ai-second-brain-header-actions" });
     this.newSessionButtonEl = createIconButton(headerActions, "square-pen", "新对话", "ai-second-brain-new-session");
@@ -99,34 +108,18 @@ export class AIChatView extends ItemView {
       void this.startNewSession();
     });
 
-    this.sessionSwitcherButtonEl = createIconButton(
-      headerActions,
-      "messages-square",
-      "切换对话",
-      "ai-second-brain-session-switcher"
-    );
-    this.sessionSwitcherButtonEl.addEventListener("click", () => {
-      this.openSessionSwitcher();
-    });
-
     this.sessionSettingsButtonEl = createIconButton(
       headerActions,
-      "settings-2",
-      "当前对话设置",
+      "ellipsis",
+      "对话与工具",
       "ai-second-brain-session-settings"
     );
-    this.sessionSettingsButtonEl.addEventListener("click", () => {
-      void this.editCurrentSession();
-    });
-
-    this.clearButtonEl = createIconButton(headerActions, "trash-2", "清空当前对话", "ai-second-brain-clear");
-    this.clearButtonEl.addEventListener("click", () => {
-      void this.clearMessages();
-    });
+    this.sessionSettingsButtonEl.addEventListener("click", (event) => this.openToolsMenu(event));
 
     this.refreshSessionControls();
 
-    this.scopePickerEl = header.createEl("button", {
+    const metadataRow = header.createDiv({ cls: "ai-second-brain-header-context" });
+    this.scopePickerEl = metadataRow.createEl("button", {
       cls: "ai-second-brain-scope-controls",
       attr: { type: "button", "aria-label": "选择 AI 可访问的文件或文件夹" }
     });
@@ -138,6 +131,9 @@ export class AIChatView extends ItemView {
       this.openContextModeMenu(event);
     });
     this.refreshScopeControls();
+    this.modelButtonEl = createIconButton(metadataRow, "cpu", "选择模型", "ai-second-brain-model-picker");
+    this.modelButtonEl.addEventListener("click", (event) => this.openModelMenu(event));
+    this.refreshModelControls();
 
     this.registerEvent(
       this.app.workspace.on("active-leaf-change", () => {
@@ -173,12 +169,14 @@ export class AIChatView extends ItemView {
       editDrawing: (instruction) => { void this.submitDrawingEdit(instruction); },
       stop: () => { this.abortController?.abort(); }
     });
+    this.composer = composer;
     this.selectionReferencesEl = composer.referencesEl;
     this.inputEl = composer.inputEl;
     this.sendButtonEl = composer.sendButtonEl;
     this.stopButtonEl = composer.stopButtonEl;
     this.drawingContextEl = composer.drawingContextEl;
     this.drawingButtonEl = composer.drawingButtonEl;
+    this.restoreSessionDraft();
 
     const ownerWindow = this.containerEl.ownerDocument.defaultView;
     const handleComposerShortcut = (event: KeyboardEvent): void => {
@@ -224,14 +222,17 @@ export class AIChatView extends ItemView {
     this.stopButtonEl = undefined;
     this.newSessionButtonEl = undefined;
     this.sessionSettingsButtonEl = undefined;
-    this.clearButtonEl = undefined;
+    this.modelButtonEl = undefined;
+    this.composer = undefined;
     this.drawingContextEl = undefined;
     this.drawingButtonEl = undefined;
   }
 
   refreshExternalState(): void {
     this.refreshScopeControls();
+    this.refreshModelControls();
     this.renderPendingSelectionReferences();
+    if (!this.isGenerating && this.messages.length === 0) this.renderMessages();
   }
 
   handleFileRename(oldPath: string, newPath: string): void {
@@ -300,7 +301,6 @@ export class AIChatView extends ItemView {
         const availablePaths = new Set(files.map((file) => file.path));
         const canReuseConfirmation =
           fingerprint === session.lastContextFingerprint &&
-          session.lastContextFilePaths.length > 0 &&
           session.lastContextFilePaths.every((path) => availablePaths.has(path));
 
         if (canReuseConfirmation) {
@@ -348,6 +348,7 @@ export class AIChatView extends ItemView {
     if (this.closed || !this.inputEl) return;
     const history = toProviderHistory(this.messages);
     this.inputEl.value = "";
+    this.sessionDrafts.delete(this.activeSessionId);
     this.messages.push({
       role: "user",
       content,
@@ -440,6 +441,27 @@ export class AIChatView extends ItemView {
     this.pendingFullRender = false;
 
     const previousTop = this.messagesEl.scrollTop;
+    const document = this.messagesEl.ownerDocument;
+    const active = document.activeElement as HTMLElement | null;
+    const snapshots = new Map<ViewChatMessage, { sourceTabs: boolean[]; fullscreen: boolean[]; focusClass?: string; focusIndex?: number }>();
+    for (const group of Array.from(this.messagesEl.querySelectorAll<HTMLElement>(".ai-second-brain-message-group"))) {
+      const message = this.messageGroups.get(group);
+      if (!message) continue;
+      const snapshot: { sourceTabs: boolean[]; fullscreen: boolean[]; focusClass?: string; focusIndex?: number } = {
+        sourceTabs: Array.from(group.querySelectorAll<HTMLElement>(".ai-second-brain-mermaid-artifact"))
+          .map(artifact => artifact.querySelectorAll<HTMLButtonElement>(".ai-second-brain-mermaid-tab")[1]?.getAttribute("aria-selected") === "true"),
+        fullscreen: Array.from(group.querySelectorAll<HTMLElement>(".ai-second-brain-mermaid-artifact"))
+          .map(artifact => artifact.classList.contains("is-fullscreen"))
+      };
+      if (active && group.contains(active)) {
+        const className = Array.from(active.classList).find(name => name.startsWith("ai-second-brain-"));
+        if (className) {
+          snapshot.focusClass = className;
+          snapshot.focusIndex = Array.from(group.querySelectorAll(`.${className}`)).indexOf(active);
+        }
+      }
+      snapshots.set(message, snapshot);
+    }
     this.clearMessageRenderComponents();
     this.messagesEl.empty();
 
@@ -450,43 +472,116 @@ export class AIChatView extends ItemView {
 
     if (this.messages.length > this.visibleMessageCount) {
       const more = this.messagesEl.createEl("button", { text: "加载更早的消息" });
-      more.addEventListener("click", () => {
-        this.visibleMessageCount += 60;
-        this.renderMessages(false);
-      });
+      more.addEventListener("click", () => this.loadEarlierMessages(more));
     }
     for (const message of this.messages.slice(-this.visibleMessageCount)) {
-      const group = this.messagesEl.createDiv({
-        cls: `ai-second-brain-message-group ai-second-brain-message-group-${message.role}`
-      });
-      const item = group.createDiv({
-        cls: `ai-second-brain-message ai-second-brain-message-${message.role}`
-      });
-      if (message.role === "assistant" && message.status) {
-        item.addClass(`ai-second-brain-message-${message.status}`);
-      }
-      item.createDiv({
-        cls: "ai-second-brain-message-role",
-        text: message.role === "user" ? "你" : "AI"
-      });
-      if (message.selectionReferences && message.selectionReferences.length > 0) {
-        this.renderMessageSelectionReferences(item, message.selectionReferences);
-      }
-      const contentEl = item.createDiv({ cls: "ai-second-brain-message-content" });
-
-      this.renderMessageContent(contentEl, message);
-      if (message.drawing) this.renderDrawingActions(item, message);
-
-      if (message.citations && message.citations.length > 0) {
-        this.renderCitations(item, message.citations, this.getCitationListKey(message));
-      }
-
-      if (message.role === "assistant" && !message.drawing && message.content.trim() && message.isComplete) {
-        this.renderAssistantActions(group, message, message.status === "complete");
-      }
+      const snapshot = snapshots.get(message);
+      let group: HTMLElement;
+      const restore = (): void => {
+        if (!snapshot || !group?.isConnected) return;
+        group.querySelectorAll<HTMLElement>(".ai-second-brain-mermaid-artifact").forEach((artifact, index) => {
+          if (snapshot.sourceTabs[index]) artifact.querySelectorAll<HTMLButtonElement>(".ai-second-brain-mermaid-tab")[1]?.click();
+          if (snapshot.fullscreen[index] && !artifact.classList.contains("is-fullscreen")) {
+            artifact.querySelectorAll<HTMLButtonElement>(".ai-second-brain-mermaid-action")[1]?.click();
+          }
+        });
+        if (snapshot.focusClass && document.activeElement === document.body) {
+          const target = group.querySelectorAll<HTMLElement>(`.${snapshot.focusClass}`)[snapshot.focusIndex ?? -1];
+          target?.focus({ preventScroll: true });
+        }
+      };
+      group = this.renderMessageGroup(this.messagesEl, message, restore);
+      restore();
     }
 
     this.messagesEl.scrollTop = followOutput ? this.messagesEl.scrollHeight : previousTop;
+  }
+
+  private loadEarlierMessages(more: HTMLButtonElement): void {
+    const list = this.messagesEl;
+    const anchor = list?.querySelector<HTMLElement>(".ai-second-brain-message-group");
+    if (!list || !anchor || !this.canRender() || this.pendingFullRender) return;
+
+    const previousStart = Math.max(0, this.messages.length - this.visibleMessageCount);
+    if (previousStart === 0) return;
+    this.visibleMessageCount += 60;
+    const start = Math.max(0, this.messages.length - this.visibleMessageCount);
+    this.historyAnchor?.release();
+    const anchorTop = anchor.getBoundingClientRect().top - list.getBoundingClientRect().top;
+    const previousOverflowAnchor = list.style.overflowAnchor;
+    list.style.overflowAnchor = "none";
+    let expectedTop = list.scrollTop;
+    let active = true;
+    const restoreAnchor = (): void => {
+      if (!active || list !== this.messagesEl ||
+        !anchor.isConnected || !this.canRender()) return;
+      if (Math.abs(list.scrollTop - expectedTop) > 1) {
+        release();
+        return;
+      }
+      const delta = anchor.getBoundingClientRect().top - list.getBoundingClientRect().top - anchorTop;
+      if (Math.abs(delta) > 0.5) list.scrollTop += delta;
+      expectedTop = list.scrollTop;
+    };
+    const observer = new ResizeObserver(restoreAnchor);
+    const onScroll = (): void => {
+      if (Math.abs(list.scrollTop - expectedTop) > 1) release();
+    };
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)) release();
+    };
+    const release = (): void => {
+      if (!active) return;
+      active = false;
+      observer.disconnect();
+      list.style.overflowAnchor = previousOverflowAnchor;
+      list.removeEventListener("scroll", onScroll);
+      list.removeEventListener("wheel", release);
+      list.removeEventListener("touchstart", release);
+      list.removeEventListener("pointerdown", release);
+      list.removeEventListener("keydown", onKeyDown);
+      if (this.historyAnchor === anchoring) this.historyAnchor = undefined;
+    };
+    const anchoring = { restore: restoreAnchor, release };
+    this.historyAnchor = anchoring;
+
+    for (const message of this.messages.slice(start, previousStart)) {
+      this.renderMessageGroup(list, message, restoreAnchor, anchor);
+    }
+    if (start === 0) more.remove();
+    restoreAnchor();
+    // Keep late Markdown, images and embeds above the reading position anchored.
+    list.querySelectorAll<HTMLElement>(".ai-second-brain-message-group").forEach(group => observer.observe(group));
+    list.addEventListener("scroll", onScroll, { passive: true });
+    list.addEventListener("wheel", release, { passive: true });
+    list.addEventListener("touchstart", release, { passive: true });
+    list.addEventListener("pointerdown", release, { passive: true });
+    list.addEventListener("keydown", onKeyDown);
+  }
+
+  private renderMessageGroup(
+    container: HTMLElement,
+    message: ViewChatMessage,
+    onRendered?: () => void,
+    before?: HTMLElement
+  ): HTMLElement {
+    const group = container.createDiv({
+      cls: `ai-second-brain-message-group ai-second-brain-message-group-${message.role}`
+    });
+    this.messageGroups.set(group, message);
+    if (before) container.insertBefore(group, before);
+    const item = group.createDiv({ cls: `ai-second-brain-message ai-second-brain-message-${message.role}` });
+    if (message.role === "assistant" && message.status) item.addClass(`ai-second-brain-message-${message.status}`);
+    item.createDiv({ cls: "ai-second-brain-message-role", text: message.role === "user" ? "你" : "AI" });
+    if (message.selectionReferences?.length) this.renderMessageSelectionReferences(item, message.selectionReferences);
+    const contentEl = item.createDiv({ cls: "ai-second-brain-message-content" });
+    this.renderMessageContent(contentEl, message, onRendered);
+    if (message.drawing) this.renderDrawingActions(item, message);
+    if (message.citations?.length) this.renderCitations(item, message.citations, this.getCitationListKey(message));
+    if (message.role === "assistant" && !message.drawing && message.content.trim() && message.isComplete) {
+      this.renderAssistantActions(group, message, message.status === "complete");
+    }
+    return group;
   }
 
   private async submitDrawingEdit(instruction: string, file?: TFile, directText = false): Promise<void> {
@@ -506,7 +601,10 @@ export class AIChatView extends ItemView {
       this.expireDrawingPreview("expired");
       if (!directText) {
         this.drawingTarget = target;
-        if (this.inputEl && this.inputEl.value === originalInput) this.inputEl.value = "";
+        if (this.inputEl && this.inputEl.value === originalInput) {
+          this.inputEl.value = "";
+          this.sessionDrafts.delete(sessionId);
+        }
         this.messages.push({ role: "user", content: instruction, isComplete: true, status: "complete", createdAt: new Date().toISOString() });
       }
       reply = { role: "assistant", content: directText ? "正在插入画布…" : "正在生成画布修改…", isComplete: false, status: "streaming", createdAt: new Date().toISOString(), drawing: { path: target.path, state: "expired" } };
@@ -741,8 +839,15 @@ export class AIChatView extends ItemView {
     const empty = container.createDiv({ cls: "ai-second-brain-empty" });
     const icon = empty.createDiv({ cls: "ai-second-brain-empty-icon" });
     setIcon(icon, "sparkles");
-    empty.createDiv({ cls: "ai-second-brain-empty-title", text: "准备好了" });
-    empty.createDiv({ cls: "ai-second-brain-empty-copy", text: "选择上下文范围，然后开始提问。" });
+    const configured = (this.plugin.settings.providers || []).some(provider => provider.enabled);
+    empty.createDiv({ cls: "ai-second-brain-empty-title", text: configured ? "从你的笔记开始" : "连接一个 AI 模型" });
+    empty.createDiv({ cls: "ai-second-brain-empty-copy", text: configured
+      ? "上方选择资料，下方提问。回答可以保存为笔记、图谱或互动页面。"
+      : "先添加服务商和模型，再开始对话。" });
+    if (!configured) {
+      const setup = createIconButton(empty, "settings-2", "配置 AI 服务商", "ai-second-brain-empty-action");
+      setup.addEventListener("click", () => this.openPluginSettings());
+    }
   }
 
   private renderThinkingState(container: HTMLElement): void {
@@ -777,7 +882,7 @@ export class AIChatView extends ItemView {
     }
   }
 
-  private renderMessageContent(container: HTMLElement, message: ViewChatMessage): void {
+  private renderMessageContent(container: HTMLElement, message: ViewChatMessage, onRendered?: () => void): void {
     const draft = this.pendingDrawing?.message === message ? this.pendingDrawing : undefined;
     if (draft) {
       container.addClass("ai-second-brain-drawing-preview");
@@ -802,6 +907,7 @@ export class AIChatView extends ItemView {
         if (container.isConnected) {
           enhanceMermaidArtifacts(container, extractMermaidSources(message.content));
           this.enhanceInlineCitations(container, message.citations || []);
+          onRendered?.();
         }
       });
       return;
@@ -831,24 +937,29 @@ export class AIChatView extends ItemView {
       void this.copyMessage(message.content);
     });
 
-    const saveWithCitationsButton = createIconButton(actions, "notebook-tabs", "保存为带引用笔记");
-    saveWithCitationsButton.disabled = !message.citations?.length;
-    saveWithCitationsButton.addEventListener("click", () => {
-      void this.saveMessageWithCitations(message);
-    });
-
     if (!includeWriteActions) {
       return;
     }
-    const writeDrawingButton = createIconButton(actions, "pencil-ruler", "插入 Excalidraw 画布");
-    writeDrawingButton.addEventListener("click", () => { void this.submitDrawingEdit(message.content, undefined, true); });
+    const saveButton = createIconButton(actions, "file-plus-2", "保存为笔记");
+    saveButton.title = message.citations?.length ? "保存回答并保留引用来源" : "将回答保存为新笔记";
+    saveButton.addEventListener("click", () => this.runAction(async () => {
+      saveButton.disabled = true;
+      try {
+        if (message.citations?.length) await this.saveMessageWithCitations(message);
+        else await this.createNoteFromMessage(message.content);
+      } finally { saveButton.disabled = false; }
+    }));
 
     const html = extractHtmlDocument(message.content);
-    if (html && this.plugin.settings.enableHtmlPreview) {
-      const htmlButton = createIconButton(actions, "app-window", "保存 HTML 并预览");
+    if (html) {
+      const htmlButton = createIconButton(actions, "app-window", "保存 HTML 并预览", "ai-second-brain-artifact-action");
       let saved: TFile | undefined;
       htmlButton.addEventListener("click", () => {
-        if (!this.plugin.settings.enableHtmlPreview) { new Notice("请先在插件设置中开启「启用 HTML 原生预览」。"); return; }
+        if (!this.plugin.settings.enableHtmlPreview) {
+          new Notice("请先在插件设置中开启「启用 HTML 原生预览」。");
+          this.openPluginSettings();
+          return;
+        }
         htmlButton.disabled = true;
         void (async () => {
           saved = saved || await saveHtmlArtifact(this.app, html);
@@ -859,51 +970,39 @@ export class AIChatView extends ItemView {
       });
     }
 
-    const diagramButton = createIconButton(actions, "workflow", "生成图谱");
-    diagramButton.addEventListener("click", () => {
-      const view = this.plugin.getEditableMarkdownView();
-      new GenerateDiagramModal(
-        this.app,
-        this.plugin,
-        view?.editor,
-        view?.file || undefined,
-        message.content,
-        message.citations
-      ).open();
-    });
+    const more = createIconButton(actions, "ellipsis", "更多操作", "ai-second-brain-message-more");
+    more.addEventListener("click", event => {
+      const menu = new Menu();
+      menu.addItem(item => item.setTitle("插入到光标").setIcon("corner-down-left").onClick(() => this.previewInsertAtCursor(message.content)));
+      menu.addItem(item => item.setTitle("替换选区").setIcon("replace").onClick(() => this.previewReplaceSelection(message.content)));
+      menu.addSeparator();
+      menu.addItem(item => item.setTitle("生成图谱").setIcon("workflow").onClick(() => {
+        const view = this.plugin.getEditableMarkdownView();
+        new GenerateDiagramModal(this.app, this.plugin, view?.editor, view?.file || undefined,
+          message.content, message.citations).open();
+      }));
+      menu.addItem(item => item.setTitle("插入 Excalidraw 画布").setIcon("pencil-ruler")
+        .onClick(() => this.runAction(() => this.submitDrawingEdit(message.content, undefined, true))));
+      menu.addSeparator();
 
-    const planButton = createIconButton(actions, "files", "创建修改计划");
-    planButton.addEventListener("click", () => {
-      const session = this.plugin.getActiveChatSession();
-      const filePaths = Array.from(new Set([
-        ...(message.citations || []).map((citation) => citation.filePath),
-        ...session.lastContextFilePaths,
-        ...session.lockedFilePaths
-      ]));
-      if (filePaths.length === 0) {
-        const activePath = this.plugin.getEditableMarkdownView()?.file?.path;
-        if (activePath) filePaths.push(activePath);
-      }
-      if (filePaths.length === 0) {
-        new Notice("当前回答没有可用于生成修改计划的笔记来源。");
-        return;
-      }
-      new ModificationPlanModal(this.app, this.plugin, message.content, filePaths).open();
-    });
-
-    const insertButton = createIconButton(actions, "corner-down-left", "插入到光标");
-    insertButton.addEventListener("click", () => {
-      this.previewInsertAtCursor(message.content);
-    });
-
-    const replaceButton = createIconButton(actions, "replace", "替换选区");
-    replaceButton.addEventListener("click", () => {
-      this.previewReplaceSelection(message.content);
-    });
-
-    const newNoteButton = createIconButton(actions, "file-plus-2", "新建笔记");
-    newNoteButton.addEventListener("click", () => {
-      void this.createNoteFromMessage(message.content);
+      menu.addItem(item => item.setTitle("创建修改计划").setIcon("files").onClick(() => {
+        const session = this.plugin.getActiveChatSession();
+        const filePaths = Array.from(new Set([
+          ...(message.citations || []).map((citation) => citation.filePath),
+          ...session.lastContextFilePaths,
+          ...session.lockedFilePaths
+        ]));
+        if (filePaths.length === 0) {
+          const activePath = this.plugin.getEditableMarkdownView()?.file?.path;
+          if (activePath) filePaths.push(activePath);
+        }
+        if (filePaths.length === 0) {
+          new Notice("当前回答没有可用于生成修改计划的笔记来源。");
+          return;
+        }
+        new ModificationPlanModal(this.app, this.plugin, message.content, filePaths).open();
+      }));
+      menu.showAtMouseEvent(event);
     });
   }
 
@@ -1286,27 +1385,27 @@ export class AIChatView extends ItemView {
       return;
     }
 
-    const config = await configureChatSession(this.app, {
-      mode: "create",
-      scopes: this.plugin.settings.contextScopes,
-      defaultScopeId: this.plugin.settings.activeContextScopeId
-    });
-
-    if (!config) {
-      return;
-    }
-
     this.rememberCurrentDraft();
-    const session = await this.plugin.createChatSession(config);
-    this.activeSessionId = session.id;
-    this.messages = [];
-    this.expandedCitationKeys.clear();
-    this.expandedCitationListKeys.clear();
-    this.refreshSessionControls();
-    this.refreshScopeControls();
-    this.renderMessages();
-    this.restoreSessionDraft();
-    this.renderPendingSelectionReferences();
+    this.setPreparingContext(true);
+    try {
+      this.resetDrawingState();
+      await this.saveMessages();
+      if (this.closed) return;
+      const session = await this.plugin.createChatSession();
+      if (this.closed) return;
+      this.activeSessionId = session.id;
+      this.messages = [];
+      this.visibleMessageCount = 60;
+      this.expandedCitationKeys.clear();
+      this.expandedCitationListKeys.clear();
+      this.refreshSessionControls();
+      this.refreshScopeControls();
+      this.renderMessages();
+      this.restoreSessionDraft();
+      this.renderPendingSelectionReferences();
+    } catch (error) {
+      new Notice(`创建对话失败：${error instanceof Error ? error.message : String(error)}`);
+    } finally { this.setPreparingContext(false); }
     this.inputEl?.focus();
   }
 
@@ -1344,37 +1443,49 @@ export class AIChatView extends ItemView {
     }
 
     this.rememberCurrentDraft();
-    this.resetDrawingState();
-    await this.saveMessages();
-    const session = await this.plugin.setActiveChatSession(sessionId);
+    this.setPreparingContext(true);
+    try {
+      this.resetDrawingState();
+      await this.saveMessages();
+      if (this.closed) return;
+      const session = await this.plugin.setActiveChatSession(sessionId);
 
-    if (!session) {
+      if (!session) {
+        this.refreshSessionControls();
+        new Notice("找不到该对话，它可能已被删除。");
+        return;
+      }
+
+      this.activeSessionId = session.id;
+      this.visibleMessageCount = 60;
+      this.messages = session.messages.map(toViewMessage);
+      this.expandedCitationKeys.clear();
+      this.expandedCitationListKeys.clear();
       this.refreshSessionControls();
-      new Notice("找不到该对话，它可能已被删除。");
-      return;
-    }
-
-    this.activeSessionId = session.id;
-    this.visibleMessageCount = 60;
-    this.messages = session.messages.map(toViewMessage);
-    this.expandedCitationKeys.clear();
-    this.expandedCitationListKeys.clear();
-    this.refreshSessionControls();
-    this.refreshScopeControls();
-    this.renderMessages();
-    this.restoreSessionDraft();
-    this.renderPendingSelectionReferences();
+      this.refreshScopeControls();
+      this.renderMessages();
+      this.restoreSessionDraft();
+      this.renderPendingSelectionReferences();
+    } finally { this.setPreparingContext(false); }
   }
 
   private async clearMessages(): Promise<void> {
-    this.abortController?.abort();
-    this.resetDrawingState();
-    this.messages = [];
-    this.expandedCitationKeys.clear();
-    this.expandedCitationListKeys.clear();
-    this.renderMessages();
-    await this.plugin.saveChatSessionMessages(this.activeSessionId, []);
-    this.refreshSessionControls();
+    if (this.isGenerating || this.isPreparingContext || this.messages.length === 0) return;
+    const sessionId = this.activeSessionId;
+    this.setPreparingContext(true);
+    try {
+      const confirmed = await confirmAction(this.app, "清空当前对话？", "此对话中的消息会被删除。已保存的笔记和页面不受影响。", "确认清空");
+      if (!confirmed || this.closed || sessionId !== this.activeSessionId) return;
+      await this.plugin.saveChatSessionMessages(sessionId, []);
+      this.resetDrawingState();
+      this.messages = [];
+      this.visibleMessageCount = 60;
+      this.expandedCitationKeys.clear();
+      this.expandedCitationListKeys.clear();
+      this.renderMessages();
+      this.refreshSessionControls();
+    } catch (error) { new Notice(`清空失败：${error instanceof Error ? error.message : String(error)}`); }
+    finally { this.setPreparingContext(false); }
   }
 
   private async saveMessages(): Promise<void> {
@@ -1397,67 +1508,26 @@ export class AIChatView extends ItemView {
 
   private setGenerating(value: boolean): void {
     this.isGenerating = value;
-    this.refreshDrawingContext();
-    if (this.drawingButtonEl) this.drawingButtonEl.disabled = value || this.isPreparingContext;
-
-    if (this.inputEl) {
-      this.inputEl.disabled = value;
-    }
-
-    if (this.sendButtonEl) {
-      this.sendButtonEl.disabled = value;
-    }
-
-    if (this.stopButtonEl) {
-      this.stopButtonEl.style.display = value ? "" : "none";
-    }
-
-    if (this.sessionSwitcherButtonEl) {
-      this.sessionSwitcherButtonEl.disabled = value;
-    }
-
-    if (this.scopePickerEl) {
-      this.scopePickerEl.disabled = value;
-    }
-
-    if (this.newSessionButtonEl) {
-      this.newSessionButtonEl.disabled = value;
-    }
-
-    if (this.sessionSettingsButtonEl) {
-      this.sessionSettingsButtonEl.disabled = value;
-    }
-
-    if (this.clearButtonEl) {
-      this.clearButtonEl.disabled = value;
-    }
+    this.refreshBusyControls();
   }
 
   private setPreparingContext(value: boolean): void {
     this.isPreparingContext = value;
+    this.refreshBusyControls();
+  }
+
+  private refreshBusyControls(): void {
+    const busy = this.isGenerating || this.isPreparingContext;
     this.refreshDrawingContext();
-    if (this.drawingButtonEl) this.drawingButtonEl.disabled = value || this.isGenerating;
-    if (this.inputEl) this.inputEl.disabled = value;
-    if (this.clearButtonEl) this.clearButtonEl.disabled = value;
-
-    if (this.sendButtonEl) {
-      this.sendButtonEl.disabled = value;
+    for (const button of [this.modelButtonEl, this.drawingButtonEl, this.sessionSwitcherButtonEl,
+      this.scopePickerEl, this.newSessionButtonEl, this.sessionSettingsButtonEl]) {
+      if (button) button.disabled = busy;
     }
-
-    if (this.sessionSwitcherButtonEl) {
-      this.sessionSwitcherButtonEl.disabled = value;
-    }
-
-    if (this.scopePickerEl) {
-      this.scopePickerEl.disabled = value;
-    }
-
-    if (this.newSessionButtonEl) {
-      this.newSessionButtonEl.disabled = value;
-    }
-
-    if (this.sessionSettingsButtonEl) {
-      this.sessionSettingsButtonEl.disabled = value;
+    if (this.composer) this.composer.setBusy(this.isGenerating, this.isPreparingContext);
+    else {
+      if (this.inputEl) this.inputEl.disabled = busy;
+      if (this.sendButtonEl) this.sendButtonEl.disabled = busy;
+      if (this.stopButtonEl) this.stopButtonEl.style.display = this.isGenerating ? "" : "none";
     }
   }
 
@@ -1470,6 +1540,71 @@ export class AIChatView extends ItemView {
     const label = session?.title || "当前对话";
     this.sessionSwitcherButtonEl.title = `切换对话：${label}`;
     this.sessionSwitcherButtonEl.setAttribute("aria-label", `切换对话：${label}`);
+    this.sessionSwitcherButtonEl.querySelector<HTMLElement>(".ai-second-brain-button-label")?.setText(label);
+  }
+
+  private runAction(action: () => Promise<unknown>): void {
+    void action().catch(error => new Notice(error instanceof Error ? error.message : String(error)));
+  }
+
+  private openPluginSettings(): void {
+    const settings = (this.app as unknown as { setting?: { open(): void; openTabById(id: string): void } }).setting;
+    if (!settings) { new Notice("请在 Obsidian 设置中打开 AI Second Brain。"); return; }
+    settings.open();
+    settings.openTabById(this.plugin.manifest.id);
+  }
+
+  private refreshModelControls(): void {
+    if (!this.modelButtonEl) return;
+    const providers = (this.plugin.settings.providers || []).filter(provider => provider.enabled);
+    const provider = providers.find(provider => provider.id === this.plugin.settings.defaultChatProviderId) || providers[0];
+    const label = provider?.defaultModel || provider?.name || "配置模型";
+    this.modelButtonEl.querySelector<HTMLElement>(".ai-second-brain-button-label")?.setText(label);
+    this.modelButtonEl.title = provider ? `${provider.name} · ${provider.defaultModel}` : "配置 AI 服务商";
+    this.modelButtonEl.setAttribute("aria-label", `选择模型：${this.modelButtonEl.title}`);
+  }
+
+  private openModelMenu(event: MouseEvent): void {
+    if (this.isGenerating || this.isPreparingContext) return;
+    const menu = new Menu();
+    for (const provider of (this.plugin.settings.providers || []).filter(provider => provider.enabled)) {
+      menu.addItem(item => item.setTitle(`${provider.name} · ${provider.defaultModel}`).setIcon(provider.type === "ollama" ? "hard-drive" : "cloud")
+        .setChecked(provider.id === this.plugin.settings.defaultChatProviderId)
+        .onClick(() => this.runAction(async () => {
+          this.plugin.settings.defaultChatProviderId = provider.id;
+          await this.plugin.saveSettings();
+          this.refreshModelControls();
+        })));
+    }
+    menu.addSeparator();
+    menu.addItem(item => item.setTitle("配置 AI 服务商").setIcon("settings-2").onClick(() => this.openPluginSettings()));
+    menu.showAtMouseEvent(event);
+  }
+
+  private openToolsMenu(event: MouseEvent): void {
+    if (this.isGenerating || this.isPreparingContext) return;
+    const menu = new Menu();
+    menu.addItem(item => item.setTitle("当前对话设置").setIcon("settings-2").onClick(() => this.runAction(() => this.editCurrentSession())));
+    menu.addSeparator();
+    menu.addItem(item => item.setTitle("AI 修改授权笔记").setIcon("files")
+      .onClick(() => new FileAgentModal(this.app, this.plugin).open()));
+    menu.addItem(item => item.setTitle("生成笔记内容").setIcon("wand-sparkles")
+      .onClick(() => new GenerateContentModal(this.app, this.plugin, this.plugin.getEditableMarkdownView()?.editor).open()));
+    menu.addItem(item => item.setTitle("生成图谱").setIcon("workflow").onClick(() => {
+      const view = this.plugin.getEditableMarkdownView();
+      new GenerateDiagramModal(this.app, this.plugin, view?.editor, view?.file || undefined).open();
+    }));
+    menu.addItem(item => item.setTitle("知识库健康检查").setIcon("activity").onClick(() => this.runAction(() => this.plugin.openKnowledgeHealthReport())));
+    menu.addItem(item => item.setTitle("生成 MOC 草稿").setIcon("network").onClick(() => this.runAction(() => this.plugin.draftManager.createMocDraft())));
+    menu.addItem(item => item.setTitle("撤销上次笔记修改").setIcon("undo-2")
+      .setDisabled(!this.plugin.modificationService?.canUndo())
+      .onClick(() => this.runAction(async () => {
+        const count = await this.plugin.modificationService.undoLastBatch();
+        new Notice(`已撤销 ${count} 项笔记修改。`);
+      })));
+    menu.addSeparator();
+    menu.addItem(item => item.setTitle("清空当前对话").setIcon("trash-2").onClick(() => this.runAction(() => this.clearMessages())));
+    menu.showAtMouseEvent(event);
   }
 
   private openSessionSwitcher(): void {
@@ -1514,10 +1649,14 @@ export class AIChatView extends ItemView {
   private restoreSessionDraft(): void {
     if (this.inputEl) {
       this.inputEl.value = this.sessionDrafts.get(this.activeSessionId) || "";
+      this.composer?.refresh();
     }
   }
 
   private clearMessageRenderComponents(): void {
+    this.messagesEl?.querySelectorAll<HTMLElement>(".ai-second-brain-mermaid-artifact")
+      .forEach(artifact => artifact.dispatchEvent(new Event("ai-second-brain-dispose")));
+    this.historyAnchor?.release();
     this.cancelStreamingTimer();
     this.pendingStreamingMessage = undefined;
 
@@ -1537,6 +1676,7 @@ export class AIChatView extends ItemView {
     if (!this.canRender()) { this.cancelStreamingTimer(); return; }
     if (this.pendingFullRender) this.renderMessages(this.pendingFollowOutput);
     else if (this.pendingStreamingMessage) this.scheduleLastMessageContentUpdate(this.pendingStreamingMessage);
+    this.historyAnchor?.restore();
   }
 
   private cancelStreamingTimer(): void {
@@ -1628,8 +1768,10 @@ export class AIChatView extends ItemView {
     const label = selectedScope ? formatScopeSelection(selectedScope, files) : "选择文件或文件夹";
     const session = this.plugin.getActiveChatSession();
     setIcon(this.scopeIconEl, getContextModeIcon(session.contextMode, selectedScope));
-    this.scopeLabelEl.setText(label);
-    this.scopePickerEl.title = `${contextModeLabel(session.contextMode)} · ${label}`;
+    this.scopeLabelEl.setText(selectedScope?.allowCloudModels === false ? `${label} · 仅本地` : label);
+    const description = `${contextModeLabel(session.contextMode)} · ${label} · ${files.length} 个文件 · ${selectedScope?.allowCloudModels === false ? "仅允许本地模型" : "允许云端模型"}`;
+    this.scopePickerEl.title = description;
+    this.scopePickerEl.setAttribute("aria-label", `选择 AI 可访问的文件或文件夹：${description}`);
   }
 
   private openContextModeMenu(event: MouseEvent): void {
@@ -1651,6 +1793,27 @@ export class AIChatView extends ItemView {
           void this.openContextSourcePicker();
         });
     });
+    const savedScopes = (this.plugin.settings.contextScopes || []).filter(scope => scope.id !== "current-file");
+    if (savedScopes.length > 0) {
+      menu.addSeparator();
+      for (const scope of savedScopes) {
+        menu.addItem(item => item.setTitle(`范围 · ${scope.name}`).setIcon(getScopeIcon(scope))
+          .setChecked(session.contextMode === "manual" && !session.contextScopeOverride && session.contextScopeId === scope.id)
+          .onClick(() => this.runAction(() => this.plugin.setActiveContextScope(scope.id))));
+      }
+    }
+    menu.addSeparator();
+    menu.addItem(item => item.setTitle("查看已授权文件").setIcon("shield-check").onClick(() => {
+      const scope = this.plugin.getActiveContextScope();
+      new AuthorizedFilesModal(this.app, scope?.name || "当前范围", this.plugin.contextScopeResolver.resolve(scope)).open();
+    }));
+    menu.addItem(item => item.setTitle("重新选择本次参考文件").setIcon("list-checks").onClick(() => this.runAction(async () => {
+      session.autoContext = true;
+      session.lastContextFingerprint = "";
+      session.lastContextFilePaths = [];
+      await this.plugin.saveSettings();
+      new Notice("下次发送前会重新确认参考文件。");
+    })));
     menu.showAtMouseEvent(event);
   }
 
@@ -1694,7 +1857,7 @@ export class AIChatView extends ItemView {
 
 function formatScopeSelection(scope: ContextScope, files: TFile[]): string {
   if (scope.mode === "current-file") {
-    return files[0]?.name || "未打开 Markdown 笔记";
+    return files[0]?.name || "未打开可用文件";
   }
 
   if (scope.mode === "files" && files.length > 0 && files.length <= 2) {

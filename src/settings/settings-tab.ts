@@ -38,6 +38,7 @@ function debouncedSave(fn: () => Promise<void>, delay = 500): void {
 }
 
 export class ObsidianAISettingTab extends PluginSettingTab {
+  private readonly expandedSections = new Set(["providers", "contexts"]);
   private readonly expandedCards = new Set<string>();
   private readonly initializedCards = new Set<string>();
   private activeSubview?: "guide";
@@ -135,7 +136,9 @@ export class ObsidianAISettingTab extends PluginSettingTab {
         }
         const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
         if (!item.target) return;
-        this.containerEl.querySelector<HTMLElement>(`#${item.target}`)?.scrollIntoView({
+        const section = this.containerEl.querySelector<HTMLElement>(`#${item.target}`);
+        if (section instanceof HTMLDetailsElement) section.open = true;
+        section?.scrollIntoView({
           behavior: reduceMotion ? "auto" : "smooth",
           block: "start"
         });
@@ -151,11 +154,17 @@ export class ObsidianAISettingTab extends PluginSettingTab {
     description: string,
     renderBody: (section: HTMLElement) => void
   ): void {
-    const section = containerEl.createDiv({
+    const section = containerEl.createEl("details", {
       cls: "ai-second-brain-settings-section",
       attr: { id: `ai-second-brain-settings-${sectionId}` }
     });
-    const header = section.createDiv({ cls: "ai-second-brain-settings-section-header" });
+    section.open = this.expandedSections.has(sectionId);
+    section.addEventListener("toggle", () => {
+      if (!section.isConnected) return;
+      if (section.open) this.expandedSections.add(sectionId);
+      else this.expandedSections.delete(sectionId);
+    });
+    const header = section.createEl("summary", { cls: "ai-second-brain-settings-section-header" });
     const icon = header.createDiv({ cls: "ai-second-brain-settings-section-icon" });
     setIcon(icon, iconName);
     const copy = header.createDiv({ cls: "ai-second-brain-settings-section-copy" });
@@ -167,7 +176,6 @@ export class ObsidianAISettingTab extends PluginSettingTab {
   private renderControlCenter(containerEl: HTMLElement): void {
     const activeScope = this.plugin.getActiveContextScope();
     const activeFiles = this.plugin.contextScopeResolver.resolve(activeScope);
-    const enabledProviders = this.plugin.settings.providers.filter((provider) => provider.enabled);
     const defaultChatProvider = this.findProvider(this.plugin.settings.defaultChatProviderId);
     const defaultEditProvider = this.findProvider(this.plugin.settings.defaultEditProviderId);
     const card = containerEl.createDiv({
@@ -176,22 +184,19 @@ export class ObsidianAISettingTab extends PluginSettingTab {
     });
     const header = card.createDiv({ cls: "ai-second-brain-control-header" });
     const title = header.createDiv({ cls: "ai-second-brain-control-title" });
-    title.createEl("h3", { text: "上下文控制中心" });
+    title.createEl("h3", { text: "上下文与模型" });
     title.createEl("p", {
       text: "确认 AI 当前能读取的内容、模型入口与隐私边界。"
     });
     header.createSpan({
       cls: activeScope?.allowCloudModels ? "ai-second-brain-badge" : "ai-second-brain-badge ai-second-brain-badge-warning",
-      text: activeScope?.allowCloudModels ? "允许云端模型" : "仅建议本地模型"
+      text: activeScope?.allowCloudModels ? "允许云端模型" : "仅允许本地模型"
     });
 
     const stats = card.createDiv({ cls: "ai-second-brain-control-stats" });
-    this.renderControlStat(stats, "激活范围", activeScope?.name || "未选择", activeScope ? scopeModeLabel(activeScope.mode) : "无可用范围");
     this.renderControlStat(stats, "授权文件", `${activeFiles.length}`, activeFiles.length > 0 ? "个上下文文件" : "当前范围为空");
     this.renderControlStat(stats, "聊天模型", this.providerSummary(defaultChatProvider), defaultChatProvider?.enabled ? "可用" : "未启用或未设置");
     this.renderControlStat(stats, "编辑模型", this.providerSummary(defaultEditProvider), defaultEditProvider?.enabled ? "可用" : "未启用或未设置");
-    this.renderControlStat(stats, "服务商", `${enabledProviders.length}/${this.plugin.settings.providers.length}`, "已启用 / 已配置");
-    this.renderControlStat(stats, "云端权限", activeScope?.allowCloudModels ? "开启" : "关闭", activeScope?.allowCloudModels ? "允许发送授权内容" : "请优先使用本地模型");
 
     const switcher = card.createDiv({ cls: "ai-second-brain-control-switcher" });
     new Setting(switcher)
@@ -221,8 +226,8 @@ export class ObsidianAISettingTab extends PluginSettingTab {
   }
 
   private renderAuthorizedFilePreview(containerEl: HTMLElement, files: { path: string; basename: string }[]): void {
-    const preview = containerEl.createDiv({ cls: "ai-second-brain-authorized-preview" });
-    const header = preview.createDiv({ cls: "ai-second-brain-authorized-header" });
+    const preview = containerEl.createEl("details", { cls: "ai-second-brain-authorized-preview" });
+    const header = preview.createEl("summary", { cls: "ai-second-brain-authorized-header" });
     header.createDiv({ cls: "ai-second-brain-authorized-title", text: "当前可访问文件" });
     header.createDiv({ cls: "ai-second-brain-authorized-count", text: files.length > 0 ? `显示 ${Math.min(files.length, 6)} / ${files.length}` : "无文件" });
 

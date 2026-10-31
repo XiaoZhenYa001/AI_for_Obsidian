@@ -23,6 +23,10 @@ python tests/html-ui-smoke.py
 python tests/html-security-smoke.py
 node tests/build-composer-harness.cjs
 python tests/composer-ui-smoke.py
+node tests/build-chat-harness.cjs
+python tests/chat-workflow-ui-smoke.py
+node tests/build-motion-harness.cjs
+python tests/motion-ui-smoke.py
 python tests/html-full-ui-smoke.py
 python tests/html-editor-ui-smoke.py
 ```
@@ -32,6 +36,12 @@ python tests/html-editor-ui-smoke.py
 绘图交互回归验证预览不写入、修改预览文字、坐标应用、画布冲突和取消操作；HTML 交互回归验证页面交互、本地 CSS/JS/图片、源码编辑与保存、依赖刷新、网络开关与宿主隔离。HTML 安全回归单独检查页面导航和网络权限切换。`html-editor-ui-smoke.py` 在 Chrome 6 倍 CPU 降速下验证保存、草稿恢复、外部修改冲突、另存副本、取消/放弃修改、后台源码恢复，以及隐藏预览时没有额外脚本心跳和文件读取。此测试不测量真实电池功耗。
 
 这些浏览器测试加载真实的功能模块，但以模拟对象代替 Obsidian 和 Excalidraw API。通过自动回归不代表已在真实 Obsidian 中完成验收，仍须按下列步骤检查插件注册、文件保存、原生撤销和插件之间的兼容性。
+
+聊天工作流回归覆盖 280/320/550/900px 侧栏和亮暗主题，检查模型与授权范围切换、HTML 保存入口、会话草稿、Ctrl+Enter、停止生成、清空确认、一键新对话、健康报告展开与设置导航。设置页另在实际 320/900px 视口附近检查宽度。图标、Markdown 渲染和宿主设置 API 由测试替身提供，截图用于插件布局检查，不能证明真实主题或插件间兼容性。
+
+`motion-ui-smoke.py` 检查历史消息前插时保留原节点与阅读位置、延迟 Markdown 和后续内容增高时的滚动补偿、用户主动上滚优先、键盘选区工具条直接显隐、触摸按钮无位移，以及减少动态效果下的引用预览和折叠箭头。它还通过浏览器布局计数检查选区建议的分片合并。`selection-preview-performance.test.cjs` 覆盖完成/失败时刷新最后文本、关闭取消任务、达到高度上限后减少测量及保留上滚位置。布局计数是夹具中的性能回归指标，不代表真实 Obsidian 帧率。
+
+`workflow-regressions.test.cjs` 复现并验证：超过 8 个文件的确认记录完整保存和重载、空选择复用及范围变化后重选、新对话清除画布状态、健康检查排除绘图源码、元数据缓存刷新、关闭内容生成或修改预览时取消请求、取消后不再发送模型请求。
 
 ## 1. 安装位置
 

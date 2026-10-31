@@ -24,9 +24,10 @@ export class Component {
   disposers: Array<() => void> = [];
   register(callback: () => void) { this.disposers.push(callback); }
   registerEvent(ref: any) { if (typeof ref === "function") this.register(ref); }
-  registerDomEvent(el: EventTarget, event: string, callback: EventListener) { el.addEventListener(event, callback); this.register(() => el.removeEventListener(event, callback)); }
+  registerDomEvent(el: EventTarget, event: string, callback: EventListener, options?: boolean | AddEventListenerOptions) { el.addEventListener(event, callback, options); this.register(() => el.removeEventListener(event, callback, options)); }
   addChild(child: any) { return child; }
   removeChild(child: any) { child.unload?.(); }
+  load() {}
   unload() { this.disposers.forEach(fn => fn()); }
 }
 export class TFile {
@@ -51,6 +52,10 @@ export class ItemView extends Component {
 }
 export class FileView extends ItemView { file: TFile | null = null; }
 export class MarkdownView extends FileView {}
+export class PluginSettingTab {
+  containerEl = document.body.createDiv({ cls: "fixture-settings" });
+  constructor(public app: any, _plugin: any) {}
+}
 export class Modal extends Component {
   modalEl: HTMLElement; contentEl: HTMLElement;
   constructor(public app: any) {
@@ -84,38 +89,77 @@ export class FuzzySuggestModal<T> extends Modal {
   }
 }
 export class Menu {
-  private items: Array<{ title: string; click: () => void }> = [];
+  private items: Array<{ title: string; disabled: boolean; click: () => void }> = [];
   addSeparator() { return this; }
   addItem(callback: (item: any) => void) {
-    const entry = { title: "", click() {} };
-    const item: any = { setTitle(value: string) { entry.title = value; return item; }, setIcon() { return item; }, setChecked() { return item; }, onClick(fn: () => void) { entry.click = fn; return item; } };
+    const entry = { title: "", disabled: false, click() {} };
+    const item: any = { setTitle(value: string) { entry.title = value; return item; }, setIcon() { return item; }, setChecked() { return item; }, setDisabled(value: boolean) { entry.disabled = value; return item; }, onClick(fn: () => void) { entry.click = fn; return item; } };
     callback(item); this.items.push(entry); return this;
   }
   showAtMouseEvent() {
     const menu = document.body.createDiv({ cls: "fixture-menu" });
-    this.items.forEach(item => menu.createEl("button", { text: item.title }).addEventListener("click", () => { menu.remove(); item.click(); }));
+    this.items.forEach(item => {
+      const button = menu.createEl("button", { text: item.title });
+      button.disabled = item.disabled;
+      button.addEventListener("click", () => { menu.remove(); item.click(); });
+    });
   }
 }
 export const MarkdownRenderer = { async render(_app: any, source: string, element: HTMLElement) { element.setText(source); } };
 export class Setting {
   controlEl: HTMLElement;
+  settingEl: HTMLElement;
+  private infoEl: HTMLElement;
   constructor(container: HTMLElement) {
-    const row = document.createElement("div"); row.className = "setting-item"; container.append(row);
-    this.controlEl = document.createElement("div"); this.controlEl.className = "setting-item-control"; row.append(this.controlEl);
+    this.settingEl = container.createDiv({ cls: "setting-item" });
+    this.infoEl = this.settingEl.createDiv({ cls: "setting-item-info" });
+    this.controlEl = this.settingEl.createDiv({ cls: "setting-item-control" });
   }
-  setName(value: string) { this.controlEl.parentElement!.prepend(Object.assign(document.createElement("label"), { textContent: value })); return this; }
-  setDesc(value: string) { this.controlEl.parentElement!.title = value; return this; }
+  setName(value: string) { this.infoEl.createDiv({ cls: "setting-item-name", text: value }); return this; }
+  setDesc(value: string) { this.infoEl.createDiv({ cls: "setting-item-description", text: value }); return this; }
   addDropdown(fn: (control: any) => void) {
     const el = document.createElement("select"); this.controlEl.append(el);
     const control = {
       selectEl: el,
       addOption(value: string, label: string) { el.add(new Option(label, value)); return control; },
       setValue(value: string) { el.value = value; return control; },
+      setDisabled(value: boolean) { el.disabled = value; return control; },
       onChange(callback: (value: string) => void) { el.addEventListener("change", () => callback(el.value)); return control; }
     }; fn(control); return this;
   }
   addText(fn: (control: any) => void) { return this.addInput("input", fn); }
   addTextArea(fn: (control: any) => void) { return this.addInput("textarea", fn); }
+  addButton(fn: (control: any) => void) {
+    const el = this.controlEl.createEl("button");
+    const control = {
+      buttonEl: el,
+      setIcon(value: string) { el.setAttribute("data-icon", value); return control; },
+      setTooltip(value: string) { el.title = value; return control; },
+      setButtonText(value: string) { el.setText(value); return control; },
+      setCta() { el.classList.add("mod-cta"); return control; },
+      setWarning() { el.classList.add("mod-warning"); return control; },
+      setDisabled(value: boolean) { el.disabled = value; return control; },
+      onClick(callback: () => void) { el.addEventListener("click", callback); return control; }
+    }; fn(control); return this;
+  }
+  addSlider(fn: (control: any) => void) {
+    const el = this.controlEl.createEl("input", { type: "range" });
+    const control = {
+      sliderEl: el,
+      setLimits(min: number, max: number, step: number) { el.min = String(min); el.max = String(max); el.step = String(step); return control; },
+      setValue(value: number) { el.value = String(value); return control; },
+      setDynamicTooltip() { return control; },
+      onChange(callback: (value: number) => void) { el.addEventListener("input", () => callback(Number(el.value))); return control; }
+    }; fn(control); return this;
+  }
+  addToggle(fn: (control: any) => void) {
+    const el = document.createElement("input"); el.type = "checkbox"; this.controlEl.append(el);
+    const control = {
+      toggleEl: el,
+      setValue(value: boolean) { el.checked = value; return control; },
+      onChange(callback: (value: boolean) => void) { el.addEventListener("change", () => callback(el.checked)); return control; }
+    }; fn(control); return this;
+  }
   private addInput(tag: "input" | "textarea", fn: (control: any) => void) {
     const el = document.createElement(tag); this.controlEl.append(el);
     const control = {

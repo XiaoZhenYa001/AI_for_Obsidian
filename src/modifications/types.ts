@@ -15,6 +15,10 @@ export type ModificationPlan = {
   title: string;
   rationale: string;
   items: ModificationPlanItem[];
+  coverage?: {
+    included: string[];
+    skipped: Array<{ path: string; reason: string }>;
+  };
 };
 
 export type ModificationSnapshotEntry = {

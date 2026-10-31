@@ -19,6 +19,10 @@ export class SelectionPreviewModal extends Modal {
   private generating = true;
   private closed = false;
   private removeDragListeners?: () => void;
+  private removeResizeListener?: () => void;
+  private pendingRender?: number;
+  private pendingRenderWindow?: Window;
+  private editorHeightCapped = false;
 
   constructor(
     app: App,
@@ -83,6 +87,12 @@ export class SelectionPreviewModal extends Modal {
     this.proposedEl.placeholder = "AI 正在读取选区与上下文…";
     this.resizeEditor();
     this.proposedEl.addEventListener("input", () => this.resizeEditor());
+    const ownerWindow = this.modalEl.ownerDocument.defaultView;
+    if (ownerWindow) {
+      const onResize = (): void => this.resizeEditor();
+      ownerWindow.addEventListener("resize", onResize);
+      this.removeResizeListener = () => ownerWindow.removeEventListener("resize", onResize);
+    }
 
     this.renderContextBlock(document, this.context.after, "ai-second-brain-selection-preview-context");
 
@@ -114,7 +124,9 @@ export class SelectionPreviewModal extends Modal {
 
   onClose(): void {
     this.closed = true;
+    this.cancelPendingRender();
     this.removeDragListeners?.();
+    this.removeResizeListener?.();
     if (this.generating) {
       this.onCancelGeneration();
     }
@@ -123,16 +135,25 @@ export class SelectionPreviewModal extends Modal {
   }
 
   appendDelta(delta: string): void {
-    if (this.closed || !delta) {
+    if (this.closed || !this.generating || !delta) {
       return;
     }
 
     this.proposed += delta;
-    if (this.proposedEl) {
-      this.proposedEl.value = this.proposed;
-      this.resizeEditor();
-      this.proposedEl.scrollTop = this.proposedEl.scrollHeight;
+    if (this.pendingRender !== undefined) {
+      return;
     }
+    const ownerWindow = this.modalEl.ownerDocument.defaultView;
+    if (!ownerWindow) {
+      this.renderProposed();
+      return;
+    }
+    this.pendingRenderWindow = ownerWindow;
+    this.pendingRender = ownerWindow.setTimeout(() => {
+      this.pendingRender = undefined;
+      this.pendingRenderWindow = undefined;
+      this.renderProposed();
+    }, 60);
   }
 
   complete(): void {
@@ -145,6 +166,7 @@ export class SelectionPreviewModal extends Modal {
       return;
     }
 
+    this.renderProposed();
     this.generating = false;
     if (this.proposedEl) {
       this.proposedEl.readOnly = false;
@@ -159,6 +181,7 @@ export class SelectionPreviewModal extends Modal {
       return;
     }
 
+    this.renderProposed();
     this.generating = false;
     this.setStatus(message, "error");
     if (this.proposedEl) {
@@ -168,6 +191,29 @@ export class SelectionPreviewModal extends Modal {
 
   isClosed(): boolean {
     return this.closed;
+  }
+
+  private cancelPendingRender(): void {
+    if (this.pendingRender !== undefined) {
+      this.pendingRenderWindow?.clearTimeout(this.pendingRender);
+      this.pendingRender = undefined;
+      this.pendingRenderWindow = undefined;
+    }
+  }
+
+  private renderProposed(): void {
+    this.cancelPendingRender();
+    const editor = this.proposedEl;
+    if (this.closed || !editor || editor.value === this.proposed) {
+      return;
+    }
+    const previousTop = editor.scrollTop;
+    const followOutput = editor.scrollHeight - editor.clientHeight - previousTop <= 24;
+    editor.value = this.proposed;
+    if (!this.editorHeightCapped) {
+      this.resizeEditor();
+    }
+    editor.scrollTop = followOutput ? editor.scrollHeight : previousTop;
   }
 
   private renderContextBlock(container: HTMLElement, text: string, className: string): void {
@@ -277,8 +323,12 @@ export class SelectionPreviewModal extends Modal {
       return;
     }
 
+    const previousTop = this.proposedEl.scrollTop;
     this.proposedEl.style.height = "auto";
-    this.proposedEl.style.height = `${Math.min(Math.max(this.proposedEl.scrollHeight, 96), 320)}px`;
+    const height = Math.min(Math.max(this.proposedEl.scrollHeight, 96), 320);
+    this.editorHeightCapped = height === 320;
+    this.proposedEl.style.height = `${height}px`;
+    this.proposedEl.scrollTop = previousTop;
   }
 }
 

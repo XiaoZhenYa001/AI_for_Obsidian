@@ -1,6 +1,7 @@
 import { App, TFile } from "obsidian";
 import { readFrontmatterTags } from "../utils/frontmatter";
 import { countWords } from "../utils/text";
+import { isExcalidrawFile } from "../diagrams/excalidraw-edit-service";
 import {
   DuplicateGroup,
   KnowledgeHealthReport,
@@ -10,6 +11,7 @@ import {
 } from "./types";
 
 export class KnowledgeAnalysisService {
+  private revision = 0;
   private pendingReports = new Map<string, Promise<KnowledgeHealthReport>>();
   private cachedReport?: {
     signature: string;
@@ -18,8 +20,15 @@ export class KnowledgeAnalysisService {
 
   constructor(private readonly app: App) {}
 
+  invalidate(): void {
+    this.revision += 1;
+    this.cachedReport = undefined;
+    this.pendingReports.clear();
+  }
+
   async analyze(scopeName: string, files: TFile[]): Promise<KnowledgeHealthReport> {
-    const signature = createAnalysisSignature(scopeName, files);
+    files = files.filter(file => file.extension.toLowerCase() === "md" && !isExcalidrawFile(file, this.app));
+    const signature = `${this.revision}:${createAnalysisSignature(scopeName, files)}`;
     if (this.cachedReport?.signature === signature) {
       return this.cachedReport.report;
     }
@@ -82,7 +91,7 @@ export class KnowledgeAnalysisService {
       linkSuggestions: await this.findLinkSuggestions(notes, pathSet, contentCache),
       tagStats: buildTagStats(notes)
     };
-    if (signature === createAnalysisSignature(scopeName, files)) this.cachedReport = { signature, report };
+    if (signature === `${this.revision}:${createAnalysisSignature(scopeName, files)}`) this.cachedReport = { signature, report };
     return report;
   }
 
@@ -91,7 +100,7 @@ export class KnowledgeAnalysisService {
     const lines: string[] = [
       "---",
       "type: moc",
-      `scope: ${report.scopeName}`,
+      `scope: ${JSON.stringify(report.scopeName)}`,
       `created: ${report.generatedAt}`,
       "---",
       "",
@@ -172,7 +181,7 @@ export class KnowledgeAnalysisService {
     const lines: string[] = [
       "---",
       `type: ${period}-review`,
-      `scope: ${report.scopeName}`,
+      `scope: ${JSON.stringify(report.scopeName)}`,
       `created: ${now.toISOString()}`,
       "---",
       "",
@@ -259,6 +268,28 @@ export class KnowledgeAnalysisService {
   ): Promise<LinkSuggestion[]> {
     const suggestions: LinkSuggestion[] = [];
     const targets = notes.map(note => ({ note, title: note.title.toLowerCase(), basename: readBasename(note.path).toLowerCase() }));
+    // Every substring match must contain its final three characters. Short
+    // names remain candidates so that their matching behavior is unchanged.
+    const namesBySuffix = new Map<string, number[]>();
+    const shortNames = new Set<number>();
+    const targetsByTag = new Map<string, number[]>();
+    targets.forEach(({ note, title, basename }, index) => {
+      for (const name of [note.title.length >= 2 ? title : undefined, basename]) {
+        if (name === undefined) continue;
+        if (name.length < 3) shortNames.add(index);
+        else {
+          const suffix = name.slice(-3);
+          const entries = namesBySuffix.get(suffix) || [];
+          entries.push(index);
+          namesBySuffix.set(suffix, entries);
+        }
+      }
+      for (const tag of note.tags) {
+        const entries = targetsByTag.get(tag) || [];
+        entries.push(index);
+        targetsByTag.set(tag, entries);
+      }
+    });
     let deadline = performance.now() + 8;
     let comparisons = 0;
 
@@ -279,7 +310,29 @@ export class KnowledgeAnalysisService {
       const linked = new Set([...source.outgoingLinks, source.path]);
       const sourceTags = new Set(source.tags);
 
-      for (const { note: target, title, basename } of targets) {
+      const candidates = new Set(shortNames);
+      const seenSuffixes = new Set<string>();
+      for (let i = 0; i + 3 <= content.length; i++) {
+        if (i % 4096 === 0 && performance.now() >= deadline) {
+          await new Promise<void>(resolve => setTimeout(resolve, 0));
+          deadline = performance.now() + 8;
+        }
+        const suffix = content.slice(i, i + 3);
+        if (seenSuffixes.has(suffix)) continue;
+        seenSuffixes.add(suffix);
+        for (const index of namesBySuffix.get(suffix) || []) candidates.add(index);
+      }
+      const tagMatches = new Map<number, number>();
+      for (const tag of sourceTags) {
+        for (const index of targetsByTag.get(tag) || []) {
+          const count = (tagMatches.get(index) || 0) + 1;
+          tagMatches.set(index, count);
+          if (count >= 2) candidates.add(index);
+        }
+      }
+      // Preserve target order when scores are equal.
+      for (const index of Array.from(candidates).sort((a, b) => a - b)) {
+        const { note: target, title, basename } = targets[index];
         if (++comparisons % 128 === 0 && performance.now() >= deadline) {
           await new Promise<void>(resolve => setTimeout(resolve, 0));
           deadline = performance.now() + 8;

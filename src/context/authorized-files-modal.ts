@@ -26,7 +26,7 @@ export class AuthorizedFilesModal extends Modal {
     heading.createEl("h2", { text: "已授权文件" });
     heading.createEl("p", {
       cls: "ai-second-brain-muted",
-      text: `${this.scopeName} · ${this.files.length} 个 Markdown 文件`
+      text: `${this.scopeName} · ${this.files.length} 个文件`
     });
 
     const search = contentEl.createDiv({ cls: "ai-second-brain-scope-files-search" });

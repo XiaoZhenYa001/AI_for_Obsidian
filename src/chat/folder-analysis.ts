@@ -1,5 +1,6 @@
 import { App, TFile, TFolder } from "obsidian";
 import { KnowledgeHealthReport } from "../knowledge/types";
+import { isExcalidrawFile } from "../diagrams/excalidraw-edit-service";
 
 export type FolderAnalysisIntent = {
   folderPaths: string[];
@@ -43,6 +44,7 @@ export function detectFolderAnalysisIntent(app: App, query: string): FolderAnaly
     .map((item) => item.folder);
   const folderPaths = selectedFolders.map((folder) => folder.path);
   const files = app.vault.getMarkdownFiles()
+    .filter((file) => !isExcalidrawFile(file, app))
     .filter((file) => folderPaths.some((path) => file.path.startsWith(`${path}/`)))
     .sort((a, b) => a.path.localeCompare(b.path));
 

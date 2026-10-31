@@ -62,6 +62,7 @@ export default class ObsidianAIPlugin extends Plugin {
   diagramService!: DiagramService;
   modificationService!: ModificationService;
   excalidrawEditService!: ExcalidrawEditService;
+  readonly chatInputDrafts = new Map<string, string>();
   private lastMarkdownView?: MarkdownView;
   private lastContextFile?: TFile;
   private statusBarEl?: HTMLElement;
@@ -254,8 +255,12 @@ export default class ObsidianAIPlugin extends Plugin {
         }).open();
       }
     });
-    this.registerEvent(this.app.metadataCache.on("resolved", () => this.textSearchService.invalidateLinks()));
+    this.registerEvent(this.app.metadataCache.on("resolved", () => {
+      this.textSearchService.invalidateLinks();
+      this.knowledgeAnalysisService.invalidate();
+    }));
     this.registerEvent(this.app.metadataCache.on("changed", () => {
+      this.knowledgeAnalysisService.invalidate();
       // Tag membership changes only after metadata parsing has completed.
       if (this.getActiveContextScope()?.mode === "tags") this.scheduleStatusBarRefresh();
     }));
@@ -752,7 +757,7 @@ export default class ObsidianAIPlugin extends Plugin {
     }
 
     if (config.lockedFilePaths !== undefined) {
-      session.lockedFilePaths = normalizeMarkdownPaths(config.lockedFilePaths);
+      session.lockedFilePaths = normalizeContextPaths(config.lockedFilePaths).slice(0, 8);
     }
 
     session.updatedAt = new Date().toISOString();
@@ -772,8 +777,8 @@ export default class ObsidianAIPlugin extends Plugin {
       return;
     }
 
-    session.lastContextFilePaths = normalizeMarkdownPaths(selectedFilePaths);
-    session.lockedFilePaths = normalizeMarkdownPaths(lockedFilePaths);
+    session.lastContextFilePaths = normalizeContextPaths(selectedFilePaths);
+    session.lockedFilePaths = normalizeContextPaths(lockedFilePaths).slice(0, 8);
     session.lastContextFingerprint = fingerprint;
     await this.saveSettings();
   }
@@ -806,6 +811,7 @@ export default class ObsidianAIPlugin extends Plugin {
     this.settings.chatSessions = this.settings.chatSessions.filter((session) => !ids.has(session.id));
     for (const sessionId of ids) {
       this.pendingSelectionReferences.delete(sessionId);
+      this.chatInputDrafts.delete(sessionId);
     }
 
     if (this.settings.chatSessions.length === 0) {
@@ -953,6 +959,7 @@ export default class ObsidianAIPlugin extends Plugin {
       this.refreshChatViews();
     } else if (providersChanged) {
       this.refreshStatusBar();
+      this.refreshChatViews();
     }
   }
 
@@ -1180,8 +1187,8 @@ function normalizeChatSessions(
         purpose: session.purpose || "",
         archived: session.archived === true,
         autoContext: session.autoContext ?? true,
-        lockedFilePaths: normalizeMarkdownPaths(session.lockedFilePaths || []),
-        lastContextFilePaths: normalizeMarkdownPaths(session.lastContextFilePaths || []),
+        lockedFilePaths: normalizeContextPaths(session.lockedFilePaths || []).slice(0, 8),
+        lastContextFilePaths: normalizeContextPaths(session.lastContextFilePaths || []),
         lastContextFingerprint: session.lastContextFingerprint || "",
         messages,
         createdAt,
@@ -1206,7 +1213,7 @@ function createChatSessionRecord(
     contextFilePath: "",
     purpose: config.purpose?.trim() || "",
     autoContext: config.autoContext ?? true,
-    lockedFilePaths: normalizeMarkdownPaths(config.lockedFilePaths || []),
+    lockedFilePaths: normalizeContextPaths(config.lockedFilePaths || []).slice(0, 8),
     lastContextFilePaths: [],
     lastContextFingerprint: "",
     messages: messages.slice(),
@@ -1215,9 +1222,8 @@ function createChatSessionRecord(
   };
 }
 
-function normalizeMarkdownPaths(paths: string[]): string[] {
-  return Array.from(new Set(paths.map((path) => path.trim()).filter(isContextFilePath)))
-    .slice(0, 8);
+function normalizeContextPaths(paths: string[]): string[] {
+  return normalizeVaultPaths(paths).filter(isContextFilePath);
 }
 
 function normalizeVaultPaths(paths: string[]): string[] {

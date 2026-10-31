@@ -1,4 +1,4 @@
-import { setIcon } from "obsidian";
+import { Notice, setIcon } from "obsidian";
 import { createMermaidMarkdown } from "../utils/mermaid";
 
 export function extractMermaidSources(markdown: string): string[] {
@@ -16,6 +16,8 @@ export function enhanceMermaidArtifacts(root: HTMLElement, sources: string[] = [
   });
 }
 
+let nextArtifactId = 0;
+
 function createMermaidArtifact(diagram: HTMLElement, source: string): void {
   const parent = diagram.parentElement;
   if (!parent) {
@@ -23,6 +25,7 @@ function createMermaidArtifact(diagram: HTMLElement, source: string): void {
   }
 
   const ownerDocument = diagram.ownerDocument;
+  const id = `ai-second-brain-mermaid-${++nextArtifactId}`;
   const artifact = ownerDocument.createElement("section");
   artifact.className = "ai-second-brain-mermaid-artifact";
   parent.insertBefore(artifact, diagram);
@@ -50,12 +53,17 @@ function createMermaidArtifact(diagram: HTMLElement, source: string): void {
   const tabs = ownerDocument.createElement("div");
   tabs.className = "ai-second-brain-mermaid-tabs";
   tabs.setAttribute("role", "tablist");
+  tabs.setAttribute("aria-label", "Mermaid 图表视图");
   controls.appendChild(tabs);
   const previewButton = createTabButton(ownerDocument, "预览", true);
   tabs.appendChild(previewButton);
   const sourceButton = createTabButton(ownerDocument, "源代码", false);
   sourceButton.disabled = !source;
   tabs.appendChild(sourceButton);
+  previewButton.id = `${id}-preview-tab`;
+  sourceButton.id = `${id}-source-tab`;
+  previewButton.setAttribute("aria-controls", `${id}-preview`);
+  sourceButton.setAttribute("aria-controls", `${id}-source`);
 
   const copyButton = createIconButton(ownerDocument, "copy", "复制为 Mermaid Markdown");
   copyButton.disabled = !source;
@@ -69,12 +77,16 @@ function createMermaidArtifact(diagram: HTMLElement, source: string): void {
   const preview = ownerDocument.createElement("div");
   preview.className = "ai-second-brain-mermaid-preview";
   preview.setAttribute("role", "tabpanel");
+  preview.id = `${id}-preview`;
+  preview.setAttribute("aria-labelledby", previewButton.id);
   body.appendChild(preview);
   preview.appendChild(diagram);
 
   const sourceView = ownerDocument.createElement("pre");
   sourceView.className = "ai-second-brain-mermaid-source";
   sourceView.setAttribute("role", "tabpanel");
+  sourceView.id = `${id}-source`;
+  sourceView.setAttribute("aria-labelledby", sourceButton.id);
   sourceView.hidden = true;
   const code = ownerDocument.createElement("code");
   code.textContent = source;
@@ -99,10 +111,23 @@ function createMermaidArtifact(diagram: HTMLElement, source: string): void {
 
   previewButton.addEventListener("click", showPreview);
   sourceButton.addEventListener("click", showSource);
+  tabs.addEventListener("keydown", (event) => {
+    if (!source || !["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const selectSource = event.key === "End" || (event.key !== "Home" && event.target === previewButton);
+    if (selectSource) { showSource(); sourceButton.focus(); }
+    else { showPreview(); previewButton.focus(); }
+  });
   copyButton.addEventListener("click", async () => {
-    await navigator.clipboard.writeText(createMermaidMarkdown(source));
+    try {
+      await navigator.clipboard.writeText(createMermaidMarkdown(source));
+    } catch {
+      new Notice("复制失败，请手动选择源代码复制。");
+      return;
+    }
     setIcon(copyButton, "check");
     copyButton.title = "已复制";
+    copyButton.setAttribute("aria-label", copyButton.title);
     ownerDocument.defaultView?.setTimeout(() => {
       setIcon(copyButton, "copy");
       copyButton.title = "复制为 Mermaid Markdown";
@@ -129,6 +154,9 @@ function createMermaidArtifact(diagram: HTMLElement, source: string): void {
   fullscreenButton.addEventListener("click", () => {
     setFullscreen(!artifact.hasClass("is-fullscreen"));
   });
+  artifact.addEventListener("ai-second-brain-dispose", () => {
+    ownerDocument.removeEventListener("keydown", handleFullscreenKeydown);
+  });
 }
 
 function createTabButton(ownerDocument: Document, label: string, selected: boolean): HTMLButtonElement {
@@ -136,12 +164,14 @@ function createTabButton(ownerDocument: Document, label: string, selected: boole
   button.type = "button";
   button.className = "ai-second-brain-mermaid-tab";
   button.textContent = label;
+  button.setAttribute("role", "tab");
   setTabState(button, selected);
   return button;
 }
 
 function setTabState(button: HTMLButtonElement, selected: boolean): void {
   button.toggleClass("is-active", selected);
+  button.tabIndex = selected ? 0 : -1;
   button.setAttribute("aria-selected", String(selected));
 }
 

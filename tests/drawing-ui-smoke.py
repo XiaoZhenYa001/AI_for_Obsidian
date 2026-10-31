@@ -62,6 +62,7 @@ with serve(root) as base_url, sync_playwright() as p:
     page.get_by_role("button", name="退出画布编辑", exact=True).click()
     calls = page.evaluate("drawingFixture.state.calls")
     page.evaluate("drawingFixture.state.appState.selectedElementIds.title = false; drawingFixture.state.appState.scrollX = 100")
+    page.get_by_role("button", name="更多操作", exact=True).click()
     page.get_by_role("button", name="插入 Excalidraw 画布", exact=True).click()
     page.get_by_role("button", name="撤销本次写入", exact=True).wait_for()
     assert page.evaluate("drawingFixture.state.calls") == calls

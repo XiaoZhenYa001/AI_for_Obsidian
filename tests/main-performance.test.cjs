@@ -36,7 +36,7 @@ test('in-place provider, template and context edits still reach their consumers'
   await plugin.saveSettings();
   assert.equal(calls.providers, 1);
   assert.equal(calls.status, 1);
-  assert.equal(calls.chat, 0);
+  assert.equal(calls.chat, 1);
   plugin.settings.providers[0].enabled = false;
   await plugin.saveSettings();
   assert.equal(calls.providers, 2);
@@ -45,10 +45,10 @@ test('in-place provider, template and context edits still reach their consumers'
   assert.equal(calls.templates, 1);
   plugin.getActiveChatSession().contextFilePath = 'renamed.md';
   await plugin.saveSettings();
-  assert.equal(calls.chat, 1);
+  assert.equal(calls.chat, 3);
   plugin.settings.defaultChatProviderId = 'other';
   await plugin.saveSettings();
-  assert.equal(calls.chat, 2);
+  assert.equal(calls.chat, 4);
   assert.equal(calls.providers, 2);
   assert.equal(calls.status, 4);
 });
@@ -70,7 +70,7 @@ test('a rejected settings write does not prevent the next save or apply stale ru
   await assert.rejects(failed, /disk full/);
   await next;
   assert.deepEqual(applied, ['latest']);
-  assert.equal(calls.chat, 0);
+  assert.equal(calls.chat, 1);
 });
 
 test('file-event bursts use one deferred status refresh and unload cancels pending work', () => {

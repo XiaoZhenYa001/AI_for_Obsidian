@@ -20,6 +20,7 @@ function fixture() {
     createSpan(options) { return this.createDiv(options); }
     setText(text) { this.empty(); this.appendChild(doc.createTextNode(text)); }
     querySelector(selector) { for (const child of this.children) { if (child.nodeType !== 1) continue; if (child.classes.has(selector.slice(1))) return child; const found = child.querySelector(selector); if (found) return found; } return null; }
+    querySelectorAll(selector) { const result = []; for (const child of this.children) { if (child.nodeType !== 1) continue; if (child.classes.has(selector.slice(1))) result.push(child); result.push(...child.querySelectorAll(selector)); } return result; }
   }
   const { AIChatView } = loadTs('src/chat/chat-view.ts', {
     obsidian: { ...obsidian, MarkdownRenderer: { async render(_app, text, target) { markdown++; target.setText(text); } } },

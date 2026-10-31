@@ -38,8 +38,9 @@ export class KnowledgeHealthReportModal extends Modal {
     this.renderStat(stats, "缺摘要", this.report.missingSummary.length);
     this.renderStat(stats, "补链建议", this.report.linkSuggestions.length);
 
-    this.renderNotesSection(contentEl, "孤立笔记", this.report.isolatedNotes.slice(0, 20));
-    this.renderNotesSection(contentEl, "缺少摘要", this.report.missingSummary.slice(0, 20));
+    this.renderNotesSection(contentEl, "孤立笔记", this.report.isolatedNotes);
+    this.renderNotesSection(contentEl, "缺少 Front Matter", this.report.missingFrontmatter);
+    this.renderNotesSection(contentEl, "缺少摘要", this.report.missingSummary);
     this.renderDuplicateSection(contentEl);
     this.renderLinkSuggestionSection(contentEl);
     this.renderTagSection(contentEl);
@@ -52,50 +53,61 @@ export class KnowledgeHealthReportModal extends Modal {
   }
 
   private renderNotesSection(container: HTMLElement, title: string, notes: KnowledgeNote[]): void {
-    const section = container.createDiv({ cls: "ai-second-brain-health-section" });
-    section.createEl("h3", { text: title });
+    const section = container.createEl("details", { cls: "ai-second-brain-health-section" });
+    section.createEl("summary", { text: `${title} · ${notes.length}` });
+    section.open = notes.length > 0;
 
     if (notes.length === 0) {
       section.createEl("p", { cls: "ai-second-brain-muted", text: "没有发现明显问题。" });
       return;
     }
 
-    for (const note of notes) {
-      this.renderNoteButton(section, note);
-    }
+    this.renderPagedList(section, notes, (list, note) => this.renderNoteButton(list, note));
   }
 
   private renderDuplicateSection(container: HTMLElement): void {
     const section = container.createDiv({ cls: "ai-second-brain-health-section" });
-    section.createEl("h3", { text: "疑似重复" });
+    section.createEl("h3", { text: `疑似重复 · ${this.report.duplicateGroups.length}` });
 
     if (this.report.duplicateGroups.length === 0) {
       section.createEl("p", { cls: "ai-second-brain-muted", text: "没有发现同名或高度相似标题。" });
       return;
     }
 
-    for (const group of this.report.duplicateGroups.slice(0, 10)) {
-      const groupEl = section.createDiv({ cls: "ai-second-brain-health-group" });
+    this.renderPagedList(section, this.report.duplicateGroups, (list, group) => {
+      const groupEl = list.createDiv({ cls: "ai-second-brain-health-group" });
       groupEl.createDiv({ cls: "ai-second-brain-muted", text: group.reason });
 
       for (const note of group.notes) {
         this.renderNoteButton(groupEl, note);
       }
-    }
+    }, 10);
   }
 
   private renderLinkSuggestionSection(container: HTMLElement): void {
     const section = container.createDiv({ cls: "ai-second-brain-health-section" });
-    section.createEl("h3", { text: "补链建议" });
+    section.createEl("h3", { text: `补链建议 · ${this.report.linkSuggestions.length}` });
 
     if (this.report.linkSuggestions.length === 0) {
       section.createEl("p", { cls: "ai-second-brain-muted", text: "没有发现明显补链机会。" });
       return;
     }
 
-    for (const suggestion of this.report.linkSuggestions.slice(0, 20)) {
-      this.renderSuggestion(section, suggestion);
-    }
+    this.renderPagedList(section, this.report.linkSuggestions, (list, suggestion) => this.renderSuggestion(list, suggestion));
+  }
+
+  private renderPagedList<T>(section: HTMLElement, items: T[], render: (list: HTMLElement, item: T) => void, step = 20): void {
+    const list = section.createDiv();
+    let visible = 0;
+    const more = section.createEl("button", { text: "显示更多", attr: { type: "button" } });
+    const showMore = () => {
+      for (const item of items.slice(visible, visible + step)) render(list, item);
+      visible = Math.min(visible + step, items.length);
+      more.hidden = visible >= items.length;
+      more.setText(`显示更多（还有 ${items.length - visible} 项）`);
+    };
+    more.addEventListener("click", showMore);
+    showMore();
   }
 
   private renderTagSection(container: HTMLElement): void {

@@ -17,28 +17,41 @@ export class ModificationService {
     return Boolean(this.lastSnapshot);
   }
 
-  async createPlan(objective: string, filePaths: string[]): Promise<ModificationPlan> {
-    const availableFiles = unique(filePaths)
-      .map((path) => this.plugin.app.vault.getAbstractFileByPath(path))
-      .filter((file): file is TFile => file instanceof TFile && file.extension === "md" && !isExcalidrawFile(file, this.plugin.app));
-    const files = selectPlanFiles(availableFiles);
+  async createPlan(objective: string, filePaths: string[], signal?: AbortSignal): Promise<ModificationPlan> {
+    signal?.throwIfAborted();
+    const contextScope = this.plugin.getActiveContextScope?.();
+    const availableFiles: TFile[] = [];
+    const skipped: Array<{ path: string; reason: string }> = [];
+    for (const path of unique(filePaths)) {
+      const file = this.plugin.app.vault.getAbstractFileByPath(path);
+      if (!(file instanceof TFile)) skipped.push({ path, reason: "文件不存在或不是文件" });
+      else if (file.extension !== "md") skipped.push({ path, reason: "仅支持 Markdown 笔记" });
+      else if (isExcalidrawFile(file, this.plugin.app)) skipped.push({ path, reason: "Excalidraw 画布不支持通用修改" });
+      else availableFiles.push(file);
+    }
+    const { files, skipped: limited } = selectPlanFiles(availableFiles);
+    skipped.push(...limited);
     if (files.length === 0) {
-      throw new Error("没有可用于生成修改计划的普通 Markdown 笔记；Excalidraw 画布请使用「AI 编辑画布内容」。");
+      throw new Error(`没有可用于生成修改计划的普通 Markdown 笔记；Excalidraw 画布请使用「AI 编辑画布内容」。${skipped.map(item => `\n${item.path}：${item.reason}`).join("")}`);
     }
 
     const contents = await Promise.all(files.map((file) => this.plugin.app.vault.cachedRead(file)));
+    signal?.throwIfAborted();
     const context = buildPlanContext(files, contents);
     const response = await this.plugin.chatService.sendMessage(
       ["用户目标：", objective.trim(), "", "允许修改的笔记：", context].join("\n"),
       {
         useContext: false,
         providerId: this.plugin.settings.defaultEditProviderId,
+        contextScope,
+        signal,
         temperature: 0.1,
         systemInstruction: buildPlanSystemInstruction()
       }
     );
+    signal?.throwIfAborted();
     const parsed = parsePlan(response.content);
-    return this.validatePlan(parsed, new Map(files.map((file, index) => [file.path, contents[index]])));
+    return { ...this.validatePlan(parsed, new Map(files.map((file, index) => [file.path, contents[index]]))), coverage: { included: files.map(file => file.path), skipped } };
   }
 
   async applyPlan(plan: ModificationPlan, selectedIds: Set<string>): Promise<number> {
@@ -352,16 +365,18 @@ function buildPlanContext(files: TFile[], contents: string[]): string {
   }).join("\n\n");
 }
 
-function selectPlanFiles(files: TFile[]): TFile[] {
+function selectPlanFiles(files: TFile[]): { files: TFile[]; skipped: Array<{ path: string; reason: string }> } {
   const selected: TFile[] = [];
+  const skipped: Array<{ path: string; reason: string }> = [];
   let estimatedChars = 0;
-  for (const file of files.slice(0, 24)) {
+  for (const [index, file] of files.entries()) {
+    if (index >= 24) { skipped.push({ path: file.path, reason: "超出前 24 个文件的限制" }); continue; }
     const fileChars = Math.max(1, file.stat.size);
-    if (estimatedChars + fileChars > MAX_PLAN_CONTEXT_CHARS) continue;
+    if (estimatedChars + fileChars > MAX_PLAN_CONTEXT_CHARS) { skipped.push({ path: file.path, reason: "超出本次内容大小预算" }); continue; }
     selected.push(file);
     estimatedChars += fileChars;
   }
-  return selected;
+  return { files: selected, skipped };
 }
 
 function buildPlanSystemInstruction(): string {

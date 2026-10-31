@@ -5,6 +5,7 @@ import { enhanceMermaidArtifacts, extractMermaidSources } from "../ui/mermaid-ar
 import { normalizeMermaidMarkdown } from "../utils/mermaid";
 import { createIconButton } from "../ui/icon-button";
 import { EditorChangeTransaction } from "./editor-change-transaction";
+import { isAbortError } from "../providers/errors";
 
 type OutputTarget = "insert" | "new-note";
 
@@ -23,6 +24,10 @@ export class GenerateContentModal extends Modal {
   private newNoteButtonEl?: HTMLButtonElement;
   private insertionTarget?: EditorChangeTransaction;
   private previewRenderComponent?: Component;
+  private generationController?: AbortController;
+  private stopButtonEl?: HTMLButtonElement;
+  private closed = false;
+  private isApplying = false;
 
   constructor(
     app: App,
@@ -39,10 +44,13 @@ export class GenerateContentModal extends Modal {
   }
 
   onClose(): void {
+    this.closed = true;
+    this.generationController?.abort();
     this.clearPreviewRenderComponent();
   }
 
   onOpen(): void {
+    this.closed = false;
     const { contentEl } = this;
     contentEl.empty();
     contentEl.addClass("ai-second-brain-generate-modal");
@@ -119,6 +127,9 @@ export class GenerateContentModal extends Modal {
     this.generateButtonEl.addEventListener("click", () => {
       void this.generate();
     });
+    this.stopButtonEl = createIconButton(actions, "square", "停止生成");
+    this.stopButtonEl.style.display = "none";
+    this.stopButtonEl.addEventListener("click", () => this.generationController?.abort());
 
     this.insertButtonEl = createIconButton(actions, "corner-down-left", "插入当前笔记");
     this.insertButtonEl.disabled = true;
@@ -135,11 +146,14 @@ export class GenerateContentModal extends Modal {
   }
 
   private async generate(): Promise<void> {
+    if (this.closed || this.generationController || this.isApplying) return;
     if (!this.prompt) {
       new Notice("请先输入提示词。");
       return;
     }
 
+    const controller = new AbortController();
+    this.generationController = controller;
     this.setBusy(true);
     this.generatedContent = "";
     this.citations = [];
@@ -150,8 +164,15 @@ export class GenerateContentModal extends Modal {
     try {
       const response = await this.plugin.chatService.sendMessage(buildGenerationPrompt(this.prompt), {
         useContext: this.useContext,
-        providerId: this.plugin.settings.defaultEditProviderId
+        providerId: this.plugin.settings.defaultEditProviderId,
+        contextScope: this.plugin.getActiveContextScope(),
+        signal: controller.signal
       });
+      if (this.closed) return;
+      if (controller.signal.aborted) {
+        this.renderPreview("已停止生成，可调整提示词后重试。", "empty");
+        return;
+      }
 
       this.generatedContent = normalizeMermaidMarkdown(response.content.trim());
       this.citations = response.citations;
@@ -159,12 +180,18 @@ export class GenerateContentModal extends Modal {
       this.renderCitations();
       this.setApplyEnabled(Boolean(this.generatedContent));
     } catch (error) {
+      if (this.closed) return;
+      if (controller.signal.aborted || isAbortError(error)) {
+        this.renderPreview("已停止生成，可调整提示词后重试。", "empty");
+        return;
+      }
       const message = error instanceof Error ? error.message : String(error);
       new Notice(message);
       this.renderPreview(`生成失败：${message}`, "error");
       this.setApplyEnabled(false);
     } finally {
-      this.setBusy(false);
+      this.generationController = undefined;
+      if (!this.closed) this.setBusy(false);
     }
   }
 
@@ -190,10 +217,11 @@ export class GenerateContentModal extends Modal {
   }
 
   private async createNewNote(): Promise<void> {
-    if (!this.generatedContent) {
+    if (!this.generatedContent || this.isApplying) {
       return;
     }
-
+    this.isApplying = true;
+    this.setApplyEnabled(false);
     try {
       const file = await this.plugin.createGeneratedNote(this.noteTitle, this.generatedContent);
       await this.app.workspace.getLeaf(false).openFile(file);
@@ -201,6 +229,9 @@ export class GenerateContentModal extends Modal {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       new Notice(`创建笔记失败：${message}`);
+    } finally {
+      this.isApplying = false;
+      if (!this.closed) this.setApplyEnabled(Boolean(this.generatedContent));
     }
   }
 
@@ -270,6 +301,7 @@ export class GenerateContentModal extends Modal {
   }
 
   private setBusy(value: boolean): void {
+    if (this.stopButtonEl) this.stopButtonEl.style.display = value ? "" : "none";
     if (this.generateButtonEl) {
       this.generateButtonEl.disabled = value;
       this.generateButtonEl.toggleClass("is-loading", value);

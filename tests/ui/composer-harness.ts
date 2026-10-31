@@ -12,7 +12,6 @@ const composer = createChatComposer(container, {
   events,
   setWidth(width: number) { container.style.width = `${width}px`; },
   setGenerating(value: boolean) {
-    composer.sendButtonEl.style.display = value ? "none" : "";
-    composer.stopButtonEl.style.display = value ? "" : "none";
+    composer.setBusy(value, false);
   }
 };

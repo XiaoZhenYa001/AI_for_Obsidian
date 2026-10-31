@@ -9,17 +9,22 @@ export class ModificationPlanModal extends Modal {
   private selected = new Set<string>();
   private bodyEl?: HTMLElement;
   private applyButton?: HTMLButtonElement;
+  private generationController?: AbortController;
+  private closed = false;
+  private isApplying = false;
 
   constructor(
     app: App,
     private readonly plugin: ObsidianAIPlugin,
     private readonly objective: string,
-    private readonly filePaths: string[]
+    private readonly filePaths: string[],
+    private readonly generatePlan?: (signal: AbortSignal) => Promise<ModificationPlan>
   ) {
     super(app);
   }
 
   onOpen(): void {
+    this.closed = false;
     this.modalEl.addClass("ai-second-brain-modification-plan-shell");
     this.contentEl.addClass("ai-second-brain-modification-plan-modal");
     const header = this.contentEl.createDiv({ cls: "ai-second-brain-modal-header" });
@@ -39,16 +44,31 @@ export class ModificationPlanModal extends Modal {
     void this.generate();
   }
 
+  onClose(): void {
+    this.closed = true;
+    this.generationController?.abort();
+  }
+
   private async generate(): Promise<void> {
+    if (this.closed || this.generationController) return;
+    const controller = new AbortController();
+    this.generationController = controller;
     try {
-      this.plan = await this.plugin.modificationService.createPlan(this.objective, this.filePaths);
+      const plan = this.generatePlan
+        ? await this.generatePlan(controller.signal)
+        : await this.plugin.modificationService.createPlan(this.objective, this.filePaths, controller.signal);
+      if (this.closed || controller.signal.aborted) return;
+      this.plan = plan;
       this.selected = new Set(this.plan.items.filter((item) => item.operation !== "delete").map((item) => item.id));
       this.renderPlan();
     } catch (error) {
+      if (this.closed || controller.signal.aborted) return;
       const message = error instanceof Error ? error.message : String(error);
       this.bodyEl?.empty();
       this.bodyEl?.createDiv({ cls: "ai-second-brain-modification-plan-error", text: message });
       new Notice(message);
+    } finally {
+      this.generationController = undefined;
     }
   }
 
@@ -67,12 +87,25 @@ export class ModificationPlanModal extends Modal {
     const summary = this.bodyEl.createDiv({ cls: "ai-second-brain-modification-plan-summary" });
     summary.createDiv({ cls: "ai-second-brain-modification-plan-title", text: this.plan.title });
     summary.createDiv({ cls: "ai-second-brain-modification-plan-rationale", text: this.plan.rationale });
+    if (this.plan.coverage) {
+      const { included, skipped } = this.plan.coverage;
+      const coverage = summary.createEl("details");
+      coverage.createEl("summary", { text: `已提供 ${included.length} 个文件供 AI 分析，跳过 ${skipped.length} 个文件` });
+      coverage.createDiv({ cls: "ai-second-brain-muted", text: "提供给 AI 不代表每个文件都有修改项。" });
+      for (const path of included) coverage.createDiv({ text: `已提供：${path}` });
+      for (const item of skipped) coverage.createDiv({ text: `已跳过：${item.path}（${item.reason}）` });
+    }
     const list = this.bodyEl.createDiv({ cls: "ai-second-brain-modification-list" });
     for (const item of this.plan.items) this.renderItem(list, item);
     this.updateApplyButton();
   }
 
   private renderItem(container: HTMLElement, item: ModificationPlanItem): void {
+    const changes = item.operation === "update"
+      ? buildLineDiff(item.originalContent || "", item.proposedContent || "").filter((operation) => operation.type !== "equal")
+      : undefined;
+    // Large updates require an explicit choice after opening the preview.
+    if (changes && changes.length > 80) this.selected.delete(item.id);
     const row = container.createEl("details", { cls: "ai-second-brain-modification-item" });
     const summary = row.createEl("summary", { cls: "ai-second-brain-modification-item-summary" });
     const checkbox = summary.createEl("input", { type: "checkbox" });
@@ -90,7 +123,8 @@ export class ModificationPlanModal extends Modal {
     setIcon(chevron, "chevron-down");
     const detail = row.createDiv({ cls: "ai-second-brain-modification-detail" });
     if (item.operation === "update") {
-      renderCompactDiff(detail, item.originalContent || "", item.proposedContent || "");
+      if (changes && changes.length > 80) detail.createDiv({ cls: "ai-second-brain-muted", text: "此修改超过 80 行，默认未选中；请检查后手动选择。" });
+      renderDiff(detail, changes || []);
     } else if (item.operation === "create") {
       detail.createEl("pre", { text: item.proposedContent || "" });
     } else {
@@ -99,11 +133,12 @@ export class ModificationPlanModal extends Modal {
   }
 
   private updateApplyButton(): void {
-    if (this.applyButton) this.applyButton.disabled = this.selected.size === 0 || !this.plan;
+    if (this.applyButton) this.applyButton.disabled = this.isApplying || this.selected.size === 0 || !this.plan;
   }
 
   private async apply(): Promise<void> {
-    if (!this.plan || !this.applyButton) return;
+    if (!this.plan || !this.applyButton || this.isApplying || this.closed) return;
+    this.isApplying = true;
     this.applyButton.disabled = true;
     try {
       const count = await this.plugin.modificationService.applyPlan(this.plan, this.selected);
@@ -112,7 +147,9 @@ export class ModificationPlanModal extends Modal {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       new Notice(message);
-      this.applyButton.disabled = false;
+    } finally {
+      this.isApplying = false;
+      if (!this.closed) this.updateApplyButton();
     }
   }
 }
@@ -121,16 +158,23 @@ function operationLabel(operation: ModificationPlanItem["operation"]): string {
   return operation === "update" ? "更新" : operation === "create" ? "新建" : operation === "rename" ? "移动" : "删除";
 }
 
-function renderCompactDiff(container: HTMLElement, original: string, proposed: string): void {
+function renderDiff(container: HTMLElement, changes: ReturnType<typeof buildLineDiff>): void {
   const diff = container.createDiv({ cls: "ai-second-brain-modification-diff" });
-  const changes = buildLineDiff(original, proposed).filter((operation) => operation.type !== "equal");
-  for (const operation of changes.slice(0, 80)) {
-    const added = operation.type === "added";
-    diff.createDiv({
-      cls: added ? "is-added" : "is-removed",
-      text: `${added ? "+" : "−"} ${operation.text}`
-    });
-  }
   if (changes.length === 0) diff.createDiv({ cls: "ai-second-brain-muted", text: "内容没有变化。" });
-  if (changes.length > 80) diff.createDiv({ cls: "ai-second-brain-muted", text: `还有 ${changes.length - 80} 行变化未展示。` });
+  let offset = 0;
+  let more: HTMLButtonElement | undefined;
+  const append = () => {
+    more?.remove();
+    for (const operation of changes.slice(offset, offset + 80)) {
+      const added = operation.type === "added";
+      diff.createDiv({ cls: added ? "is-added" : "is-removed", text: `${added ? "+" : "−"} ${operation.text}` });
+    }
+    offset = Math.min(offset + 80, changes.length);
+    if (offset < changes.length) {
+      more = diff.createEl("button", { text: `显示更多变化（剩余 ${changes.length - offset} 行）` });
+      more.type = "button";
+      more.addEventListener("click", append);
+    }
+  };
+  append();
 }
